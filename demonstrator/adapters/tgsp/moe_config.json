@@ -1,0 +1,66 @@
+{
+  "model": "Qwen/Qwen2.5-1.5B",
+  "experts": {
+    "banking_expert": {
+      "tgsp_path": "demonstrator/adapters/tgsp/banking_expert.tgsp",
+      "checkpoint_path": "demonstrator/adapters/banking_expert_rl/adapter_rl_final.pt",
+      "gate_type": "step",
+      "gate_keywords": [
+        "bank",
+        "deposit",
+        "loan",
+        "mortgage",
+        "credit",
+        "savings",
+        "checking",
+        "interest rate",
+        "refinance"
+      ],
+      "always_active": false
+    },
+    "investment_expert": {
+      "tgsp_path": "demonstrator/adapters/tgsp/investment_expert.tgsp",
+      "checkpoint_path": "demonstrator/adapters/investment_expert_rl/adapter_rl_final.pt",
+      "gate_type": "step",
+      "gate_keywords": [
+        "invest",
+        "portfolio",
+        "stock",
+        "bond",
+        "etf",
+        "dividend",
+        "market",
+        "allocation",
+        "risk"
+      ],
+      "always_active": false
+    },
+    "shared_attention": {
+      "tgsp_path": "demonstrator/adapters/tgsp/shared_attention.tgsp",
+      "checkpoint_path": "demonstrator/adapters/shared_attention_rl/adapter_rl_final.pt",
+      "gate_type": "none",
+      "always_active": true
+    }
+  },
+  "he_config": {
+    "scheme": "ckks",
+    "poly_modulus_degree": 16384,
+    "coeff_modulus_bits": [
+      60,
+      40,
+      40,
+      60
+    ],
+    "scale_bits": 40,
+    "use_column_packing": true,
+    "simd_slots": 8192,
+    "note_cukks": "CuKKS GPU auto-selects poly_n=32768 slots=16384 for depth=3. Config values are Pyfhel/CPU fallback defaults."
+  },
+  "gatelink_config": {
+    "device_profile": "phone",
+    "client_layers": 1,
+    "dp_epsilon": 1.0,
+    "max_epsilon": 10.0,
+    "max_lora_rank": 32
+  }
+}

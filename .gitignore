@@ -1,0 +1,68 @@
+# ══════════════════════════════════════════════════════════════
+# TenSafe .gitignore
+# ══════════════════════════════════════════════════════════════
+
+# ── Model weights & adapter checkpoints (multi-GB) ───────────
+demonstrator/adapters/*/adapter_final.pt
+demonstrator/adapters/*/adapter_rl_final.pt
+demonstrator/adapters/tgsp/*.tgsp
+demonstrator/frontend/weights/embed_tokens.bin
+demonstrator/frontend/weights/lm_head.bin
+demonstrator/frontend/weights/tokenizer.json
+demonstrator/frontend/weights/vocab.json
+demonstrator/checkpoints/
+
+# ── Archive / legacy zip files ────────────────────────────────
+*.zip
+*.z01
+*.z02
+nul
+
+# ── Separate repos (have their own .git) ─────────────────────
+Adapter-Safety-Tensafe/
+TenSafe-Homormorphically-Encrypted-LoRA-Adaptation/
+TenSafe_Extracted/
+
+# ── Python ────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.egg
+dist/
+build/
+.eggs/
+*.so
+.venv/
+venv/
+env/
+
+# ── Logs & temp files ─────────────────────────────────────────
+*.log
+nohup.out
+
+# ── IDE / editor ──────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ── Claude Code session data ──────────────────────────────────
+.claude/
+
+# ── Temp benchmark/debug scripts (keep bench_split_ws.py) ────
+debug_model.py
+debug_prompt_format.py
+start_server_16k.sh
+server_16k.log
+relay_16k.log
+
+# ── Large binary artifacts ────────────────────────────────────
+*.safetensors
+*.bin
+!demonstrator/frontend/weights/config.json
+*.tgsp
+offload/

@@ -1,0 +1,36 @@
+# === Core Web Framework ===
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+websockets>=12.0
+python-multipart
+pydantic>=2.0
+
+# === ML / Training ===
+torch>=2.1.0
+transformers>=4.36.0
+datasets>=2.16.0
+peft>=0.7.0
+accelerate>=0.25.0
+safetensors>=0.4.0
+sentencepiece
+
+# === Homomorphic Encryption (CKKS via OpenFHE) ===
+# CuKKS: GPU-accelerated CKKS built on OpenFHE
+# Install from: https://github.com/devUuung/CuKKS
+# pip install cukks  (or build from source with CUDA support)
+openfhe>=0.8.0
+
+# === Post-Quantum Cryptography ===
+# liboqs: Kyber768 (ML-KEM) + Dilithium3 (ML-DSA)
+liboqs-python>=0.9.0
+
+# === Numerical ===
+numpy>=1.24.0
+scipy>=1.11.0
+
+# === Crypto ===
+cryptography>=41.0.0
+PyJWT>=2.8.0
+
+# === Utilities ===
+tqdm

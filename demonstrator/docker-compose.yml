@@ -1,0 +1,38 @@
+version: "3.8"
+
+services:
+  tensafe-demo:
+    build:
+      context: ..
+      dockerfile: demonstrator/Dockerfile
+    container_name: tensafe-finance-demo
+    ports:
+      - "8000:8000"
+    volumes:
+      # Persist trained adapters across container restarts
+      - ./adapters:/app/demonstrator/adapters
+      - ./checkpoints:/app/demonstrator/checkpoints
+      # HuggingFace cache (avoid re-downloading models)
+      - hf-cache:/root/.cache/huggingface
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    environment:
+      - DEVICE=cuda
+      - MOE_CONFIG_PATH=/app/demonstrator/adapters/tgsp/moe_config.json
+      - NVIDIA_VISIBLE_DEVICES=all
+      - HF_HOME=/root/.cache/huggingface
+      - TRANSFORMERS_CACHE=/root/.cache/huggingface/hub
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+volumes:
+  hf-cache:

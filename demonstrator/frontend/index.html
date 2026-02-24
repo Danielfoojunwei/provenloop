@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <title>TenSafe Finance Demo</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <!-- Header -->
+  <header id="header">
+    <div class="header-left">
+      <h1>TenSafe</h1>
+      <span class="badge" id="badge-status">Connecting...</span>
+    </div>
+    <div class="header-right">
+      <button id="btn-compare" title="Compare mode">Compare</button>
+      <button id="btn-settings" title="Settings">Settings</button>
+    </div>
+  </header>
+
+  <!-- Metrics bar -->
+  <div id="metrics-bar">
+    <div class="metric">
+      <span class="metric-val" id="m-toks">--</span>
+      <span class="metric-lbl">tok/s</span>
+    </div>
+    <div class="metric">
+      <span class="metric-val" id="m-latency">--</span>
+      <span class="metric-lbl">ms/tok</span>
+    </div>
+    <div class="metric">
+      <span class="metric-val" id="m-heops">--</span>
+      <span class="metric-lbl">HE ops</span>
+    </div>
+    <div class="metric">
+      <span class="metric-val" id="m-rot">0</span>
+      <span class="metric-lbl">rotations</span>
+    </div>
+  </div>
+
+  <!-- HE breakdown -->
+  <div id="he-breakdown" class="collapsed">
+    <div class="he-row"><span>Encrypt</span><span id="he-enc">--</span></div>
+    <div class="he-row"><span>Compute</span><span id="he-comp">--</span></div>
+    <div class="he-row"><span>Decrypt</span><span id="he-dec">--</span></div>
+    <div class="he-row"><span>Network</span><span id="he-net">--</span></div>
+    <div class="he-row"><span>SIMD slots</span><span id="he-slots">--</span></div>
+    <div class="he-row"><span>Ciphertext</span><span id="he-ctbytes">--</span></div>
+  </div>
+
+  <!-- Encryption pipeline visualization -->
+  <div id="pipeline-bar">
+    <div class="pipe-stage" id="pipe-plaintext">
+      <span class="pipe-icon">&#x1f4dd;</span>
+      <span class="pipe-label">Plaintext</span>
+      <span class="pipe-time" id="pipe-t-plain"></span>
+    </div>
+    <span class="pipe-arrow">&#x2192;</span>
+    <div class="pipe-stage" id="pipe-encrypt">
+      <span class="pipe-icon">&#x1f512;</span>
+      <span class="pipe-label">Encrypt</span>
+      <span class="pipe-time" id="pipe-t-enc"></span>
+    </div>
+    <span class="pipe-arrow">&#x2192;</span>
+    <div class="pipe-stage" id="pipe-compute">
+      <span class="pipe-icon">&#x2699;</span>
+      <span class="pipe-label">HE Compute</span>
+      <span class="pipe-time" id="pipe-t-comp"></span>
+    </div>
+    <span class="pipe-arrow">&#x2192;</span>
+    <div class="pipe-stage" id="pipe-decrypt">
+      <span class="pipe-icon">&#x1f513;</span>
+      <span class="pipe-label">Decrypt</span>
+      <span class="pipe-time" id="pipe-t-dec"></span>
+    </div>
+    <span class="pipe-arrow">&#x2192;</span>
+    <div class="pipe-stage" id="pipe-response">
+      <span class="pipe-icon">&#x2705;</span>
+      <span class="pipe-label">Response</span>
+      <span class="pipe-time" id="pipe-t-resp"></span>
+    </div>
+  </div>
+
+  <!-- Expert routing display -->
+  <div id="routing-bar">
+    <div class="route-pill" id="route-banking">
+      <span class="route-dot">&#x25cb;</span>
+      <span class="route-name">Banking</span>
+      <span class="route-count" id="route-banking-count"></span>
+    </div>
+    <div class="route-pill" id="route-investment">
+      <span class="route-dot">&#x25cb;</span>
+      <span class="route-name">Investment</span>
+      <span class="route-count" id="route-investment-count"></span>
+    </div>
+    <div class="route-pill always-on" id="route-shared">
+      <span class="route-dot">&#x25c6;</span>
+      <span class="route-name">Shared</span>
+      <span class="route-count" id="route-shared-count"></span>
+    </div>
+  </div>
+
+  <!-- Split inference status bar (hidden by default) -->
+  <div id="split-status" class="hidden">
+    <span id="split-stage"></span>
+    <div id="split-progress-wrap">
+      <div id="split-progress-bar"></div>
+    </div>
+    <span id="split-detail"></span>
+  </div>
+
+  <!-- Chat area -->
+  <main id="chat-area">
+    <div id="messages"></div>
+  </main>
+
+  <!-- Compare panel (hidden by default) -->
+  <div id="compare-panel" class="hidden">
+    <div class="compare-col">
+      <h3>Base Qwen 1.5B</h3>
+      <div id="cmp-base" class="cmp-text">--</div>
+      <div class="cmp-stats" id="cmp-base-stats"></div>
+    </div>
+    <div class="compare-col">
+      <h3>+ LoRA Adapted (HE)</h3>
+      <div id="cmp-adapted" class="cmp-text">--</div>
+      <div class="cmp-stats" id="cmp-adapted-stats"></div>
+    </div>
+  </div>
+
+  <!-- Input -->
+  <footer id="input-bar">
+    <input type="text" id="input-msg" placeholder="Ask a finance question..." autocomplete="off">
+    <button id="btn-send">Send</button>
+  </footer>
+
+  <!-- Settings drawer -->
+  <div id="settings-drawer" class="hidden">
+    <div class="settings-content">
+      <h2>Settings</h2>
+      <label>Temperature <span id="v-temp">0.7</span>
+        <input type="range" id="s-temp" min="0" max="2" step="0.1" value="0.7">
+      </label>
+      <label>Top-P <span id="v-topp">0.9</span>
+        <input type="range" id="s-topp" min="0" max="1" step="0.05" value="0.9">
+      </label>
+      <label>Top-K <span id="v-topk">50</span>
+        <input type="range" id="s-topk" min="0" max="100" step="5" value="50">
+      </label>
+      <label>Max tokens <span id="v-maxt">256</span>
+        <input type="range" id="s-maxt" min="32" max="512" step="32" value="256">
+      </label>
+      <label class="toggle-label">
+        <input type="checkbox" id="s-he" checked> HE Encryption
+      </label>
+      <label class="toggle-label">
+        <input type="checkbox" id="s-split"> GateLink-Split (on-device)
+      </label>
+      <hr>
+      <div class="info-row"><span>Model</span><span>Qwen 2.5 1.5B</span></div>
+      <div class="info-row"><span>LoRA rank</span><span>32</span></div>
+      <div class="info-row"><span>HE scheme</span><span>CKKS</span></div>
+      <div class="info-row"><span>SIMD slots</span><span>8192</span></div>
+      <div class="info-row"><span>Rotations</span><span>0 (ZeRo-MOAI)</span></div>
+      <div class="info-row"><span>Device</span><span>iPhone 15 Pro</span></div>
+      <div class="info-row"><span>Split K</span><span>1 layer</span></div>
+      <div class="info-row"><span>DP epsilon</span><span id="v-dp-eps">0.0 (disabled)</span></div>
+      <div class="info-row"><span>Budget spent</span><span id="v-budget">--</span></div>
+      <button id="btn-reset-budget" style="margin-top:10px;width:100%;padding:10px;background:#3a2211;border:1px solid var(--warn);color:var(--warn);border-radius:8px;font-size:13px;font-weight:600;cursor:pointer;">Reset Privacy Budget</button>
+      <button id="btn-close-settings">Close</button>
+    </div>
+  </div>
+
+  <script src="split_client.js?v=10"></script>
+  <script src="app.js?v=10"></script>
+</body>
+</html>

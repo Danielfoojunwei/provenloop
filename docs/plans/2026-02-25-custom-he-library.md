@@ -83,25 +83,17 @@ On H100 (6x scaling): **~14 → ~10 ms HE → ~13 ms total → 77 tok/s** (up fr
 | cuFHE | TFHE | CUDA TFHE, no CKKS |
 | cuHE | BFV only | No CKKS |
 
-### GPU NTT Implementations (Can Reference)
+### GPU NTT Implementations (Reference for Custom Kernels)
 
-| Source | Language | Notes |
-|--------|----------|-------|
-| FIDESlib NTT kernels | CUDA | Heavily optimized for CKKS, open-source |
-| HEonGPU NTT | CUDA | Multi-limb RNS NTT |
-| Phantom-FHE NTT | CUDA | Butterfly-style CUDA NTT |
-| cuNTT (standalone) | CUDA | Standalone NTT library |
-| Troy (GPU HE) | CUDA | Another GPU CKKS with NTT focus |
-
-### FPGA HE Accelerators (Future Reference)
-
-| Accelerator | Paper | Speedup | Notes |
-|---|---|---|---|
-| FAB | HPCA 2023 | 9.5x over GPU for bootstrapping | FPGA-based, NTT + automorphism engines |
-| CraterLake | ISCA 2022 | 4,600x over CPU | ASIC design, 512 NTT lanes |
-| F1 | MICRO 2021 | 5,400x over CPU | MIT, programmable FHE accelerator |
-| BTS | ISCA 2022 | Bootstrapping-focused | Targets the bootstrapping bottleneck |
-| REED | arXiv 2023 | Chiplet-based scaling | Multi-die FHE, good for large polynomials |
+| Source | Language | Performance | Notes |
+|--------|----------|------------|-------|
+| **FIDESlib** NTT kernels | CUDA | 70x over AVX-OpenFHE | Best open-source GPU CKKS, OpenFHE interop (Apache-2.0) |
+| **HEonGPU** NTT | CUDA | 380x over SEAL, bootstrap <170ms | Multi-stream CUDA, BFV+CKKS (MIT) |
+| **Phantom-FHE** NTT | CUDA | 380x over SEAL | Kernel fusion, hybrid key-switch (GPLv3) |
+| **Cheddar** | CUDA | 2.9-25.6x over prior GPU | 32-bit RNS for GPU-native datapath — **key for Groq-native NTT research** |
+| **Neo** (ISCA 2025) | CUDA | 3.28x over TensorFHE | Uses Tensor Cores for FHE — relevant if Groq adds tensor ops |
+| **HI-CKKS** | CUDA | 692 kop/s NTT on 4090 | High-throughput batch NTT optimization |
+| Troy | CUDA | — | GPU BFV/CKKS/BGV implementation |
 
 ---
 
@@ -111,12 +103,14 @@ On H100 (6x scaling): **~14 → ~10 ms HE → ~13 ms total → 77 tok/s** (up fr
 
 1. **CKKS-only.** No BFV, BGV, TFHE. Zero scheme-selection overhead.
 2. **ZeRo-MOAI-native.** No rotation support. No Galois keys. No key switching.
-3. **GPU-first.** All polynomial operations in CUDA. CPU path for testing only.
-4. **Fused kernels.** Encode+encrypt in one kernel. Decrypt+decode in one kernel.
-5. **Fixed polynomial degrees.** Specialize NTT for poly_n ∈ {8192, 16384, 32768}. No generic N.
-6. **Rust core + CUDA kernels.** Memory safety for parameter management, raw CUDA for compute.
-7. **Python bindings.** PyO3 for seamless integration with existing TenSafe inference engine.
-8. **Zero-copy GPU interop.** Direct torch.Tensor ↔ ciphertext via DLPack/CUDA pointers.
+3. **Groq-first.** Optimized for Groq LPU + GPU co-processor architecture. Minimize Groq↔GPU data transfer.
+4. **GPU-accelerated HE.** All polynomial operations in CUDA (H100/B200). CPU path for testing only.
+5. **Fused kernels.** Encode+encrypt in one kernel. Decrypt+decode in one kernel.
+6. **Fixed polynomial degrees.** Specialize NTT for poly_n ∈ {8192, 16384, 32768}. No generic N.
+7. **Rust core + CUDA kernels.** Memory safety for parameter management, raw CUDA for compute.
+8. **Python bindings.** PyO3 for seamless integration with existing TenSafe inference engine.
+9. **Zero-copy GPU interop.** Direct torch.Tensor ↔ ciphertext via DLPack/CUDA pointers.
+10. **Groq data path optimization.** Compact serialization for Groq LPU → GPU hidden state transfer.
 
 ### Module Layout
 
@@ -415,24 +409,61 @@ Week 10:
   - Package: pip install tensafe-he (manylinux wheel with CUDA)
 ```
 
-### Phase 5: FPGA Backend (Weeks 11-16, parallel with Phase 4)
+### Phase 5: Groq LPU Integration (Weeks 11-14)
 
-**Goal:** FPGA NTT accelerator for maximum throughput.
+**Goal:** Optimize TenSafe-HE specifically for Groq LPU + GPU co-processor architecture.
 
 ```
-Weeks 11-12:
-  - FPGA NTT engine design (Verilog/SystemVerilog or HLS)
-  - Target: Xilinx Alveo U250 or Intel Agilex
-  - NTT butterfly pipeline with configurable poly_n
+Week 11:
+  - Groq API integration: call Groq for transformer forward pass
+  - Define compact serialization format for hidden state transfer
+  - Measure Groq→GPU transfer latency baseline (target: <1 ms for 6 KB)
+  - Profile end-to-end: Groq transformer + GPU HE pipeline
 
-Weeks 13-14:
-  - Integrate FPGA NTT with Rust core via PCIe DMA
-  - Benchmark FPGA NTT vs CUDA NTT
+Week 12:
+  - Optimize Groq↔GPU data path:
+    - Pre-allocate pinned receive buffer for Groq output
+    - Overlap Groq API call with previous token's HE pipeline
+    - Pipeline hidden state arrival with encrypt kernel launch
+  - Implement async double-buffering (Groq produces while GPU computes)
 
+Week 13:
+  - Multi-model support: adapt pipeline for 8B and 70B hidden dimensions
+    - 8B (hidden=4096): cols_per_ct=2, 16 batches
+    - 70B (hidden=8192): cols_per_ct=1 at poly_n=16384 → use poly_n=32768
+  - Benchmark all model sizes on Groq + H100
+
+Week 14:
+  - End-to-end agentic benchmark: 10-step and 30-step agent workflows
+  - Stress test: concurrent sessions on single Groq+H100 instance
+  - Production readiness: error handling, reconnection, monitoring
+  - Target performance:
+    - 1.5B on Groq + H100: ~77 tok/s (vs 37 with CuKKS)
+    - 8B on Groq + H100: ~50 tok/s (vs 24 with CuKKS)
+    - 70B on Groq + H100: ~25 tok/s (vs 14 with CuKKS)
+```
+
+### Phase 6: Next-Gen GPU + Groq-Native NTT Research (Weeks 15-20)
+
+**Goal:** Prepare for B200 and explore running NTT on Groq LPU natively.
+
+```
 Weeks 15-16:
-  - Full pipeline on FPGA: encrypt + ct×pt + decrypt
-  - Integration with TenSafe inference engine
-  - Benchmark: target 30x speedup over RTX A2000
+  - Port and tune kernels for NVIDIA B200 (Blackwell architecture)
+  - B200 has ~2x memory bandwidth over H100 → ~2x NTT speedup
+  - Target: ~5 ms HE pipeline on B200 → ~125 tok/s with Groq
+
+Weeks 17-18:
+  - Research: can NTT butterfly operations run on Groq's deterministic
+    datapath? Groq has 80 TB/s internal bandwidth — ideal for NTT.
+  - Key question: does Groq support 64-bit modular arithmetic?
+  - If yes: prototype NTT as structured matrix ops on Groq LPU
+  - If no: explore reduced-precision NTT (32-bit RNS, cf. Cheddar paper)
+
+Weeks 19-20:
+  - If Groq-native NTT viable: prototype single-chip encrypted inference
+  - Target: eliminate co-processor entirely → ~3 ms total → ~330 tok/s
+  - If not viable: document findings, continue GPU co-processor path
 ```
 
 ---
@@ -444,7 +475,10 @@ Weeks 15-16:
 | NTT implementation bugs (wrong results, silent errors) | Medium | Critical | Cross-validate against OpenFHE for 10K+ random inputs |
 | CUDA kernel correctness across GPU architectures | Medium | High | Test on Ampere (A2000, A100), Ada (4090), Hopper (H100) |
 | Security parameter misconfiguration | Low | Critical | Hardcode only NIST-approved parameter sets, no user-configurable security |
-| Performance doesn't beat CuKKS | Low | Medium | CuKKS wraps generic OpenFHE; specialized kernels should win. If not, still valuable for FPGA path |
+| Performance doesn't beat CuKKS | Low | Medium | CuKKS wraps generic OpenFHE; specialized kernels should win |
+| Groq API latency variability | Medium | Medium | Double-buffer + async overlap; fall back to local GPU if Groq unavailable |
+| Groq↔GPU transfer becomes bottleneck | Medium | High | Compact serialization, pinned memory, PCIe Gen5; hidden state is only 6-32 KB |
+| Groq doesn't support 64-bit modular arithmetic for native NTT | High | Low | Continue GPU co-processor path; this is a research bet, not a dependency |
 | PyO3 binding memory leaks (GPU buffers) | Medium | Medium | Rust RAII + explicit CUDA free in Drop trait |
 | Fused kernel register pressure | Medium | Low | Fall back to separate kernels if fused version hits occupancy limits |
 
@@ -469,8 +503,11 @@ Weeks 15-16:
 - [CKKS original](https://eprint.iacr.org/2016/421) — Cheon, Kim, Kim, Song (2017)
 - [Full-RNS CKKS](https://eprint.iacr.org/2018/931) — RNS variant we implement
 - [GPU NTT for FHE](https://eprint.iacr.org/2024/1543) — HEonGPU paper
-- [FIDESlib](https://arxiv.org/abs/2507.04775) — GPU CKKS optimization techniques
-- [FAB FPGA accelerator](https://bu-icsg.github.io/publications/2023/fhe_accelerator_fpga_hpca2023.pdf) — FPGA NTT reference
+- [FIDESlib](https://arxiv.org/abs/2507.04775) — GPU CKKS optimization techniques (Jul 2025)
+- [Cheddar](https://arxiv.org/abs/2407.13055) — 32-bit RNS for GPU-native datapath (ASPLOS 2026, 2.9-25.6x over prior GPU)
+- [Neo](https://dl.acm.org/doi/10.1145/3695053.3731408) — Tensor Core acceleration for all CKKS kernels (ISCA 2025, 3.28x over TensorFHE)
+- [HI-CKKS](https://eprint.iacr.org/2024/1976) — High-throughput GPU NTT: 692 kop/s on RTX 4090
+- [GPU NTT optimal parameters](https://eprint.iacr.org/2023/1410) — Ozcan et al., state-of-art CUDA NTT for all power-of-2 degrees
 
 ---
 
@@ -479,12 +516,52 @@ Weeks 15-16:
 | Metric | Target | Measurement |
 |--------|--------|-------------|
 | **Correctness** | 100% token match vs CuKKS (greedy) | benchmark_cukks.py quality parity test |
-| **HE pipeline latency** | ≤61 ms on RTX A2000 (vs 86 ms CuKKS) | Per-token HE breakdown |
-| **End-to-end tok/s** | ≥9.1 on A2000 (vs 7.4 CuKKS) | benchmark_cukks.py |
+| **HE pipeline latency (A2000)** | ≤61 ms (vs 86 ms CuKKS) | Per-token HE breakdown |
+| **HE pipeline latency (H100)** | ≤10 ms (vs ~14 ms CuKKS) | Per-token HE breakdown |
+| **tok/s (A2000 standalone)** | ≥9.1 (vs 7.4 CuKKS) | benchmark_cukks.py |
+| **tok/s (Groq + H100, 8B)** | ≥50 (vs ~24 with CuKKS) | End-to-end Groq benchmark |
+| **tok/s (Groq + B200, 8B)** | ≥91 | End-to-end Groq benchmark |
+| **10-step agent (Groq + H100)** | ≤40s | Agentic workflow benchmark |
 | **Security** | ≥128-bit for all parameter sets | NIST parameter validation |
 | **Binary size** | <50 MB wheel | pip package size |
 | **Build time** | <5 min from clean | CI build time |
 | **API compatibility** | Drop-in for inference_engine.py | Integration test passes |
+
+---
+
+## Groq-Optimized Performance Projections
+
+### Why No FPGA
+
+FPGA was originally proposed as a dedicated HE accelerator. We're dropping it because:
+
+1. **Cost.** FPGA engineers cost $200-400K/yr and are scarce. A single hire costs more than the Groq partnership.
+2. **Time.** FPGA development is 6-12 months before first working silicon. Custom CUDA kernels ship in weeks.
+3. **GPU keeps getting faster.** H100 → B200 doubles memory bandwidth → doubles NTT speed. NVIDIA solves hardware scaling for free.
+4. **Groq may absorb HE natively.** 80 TB/s internal bandwidth is ideal for NTT butterflies. If Groq adds 64-bit integer support, the LPU itself becomes the HE accelerator.
+5. **Simpler architecture.** "Groq rack + GPU card" is one procurement. Adding "custom FPGA board" makes enterprise deployment harder.
+
+### Projected Performance: TenSafe-HE vs CuKKS on Groq
+
+| Configuration | CuKKS (current) | TenSafe-HE (custom) | Improvement |
+|---|---|---|---|
+| A2000 standalone, 1.5B | 7.4 tok/s | ~9.1 tok/s | +23% |
+| Groq + H100, 1.5B | ~37 tok/s | **~77 tok/s** | **+108%** |
+| Groq + H100, 8B | ~24 tok/s | **~50 tok/s** | **+108%** |
+| Groq + H100, 70B | ~14 tok/s | **~25 tok/s** | **+79%** |
+| Groq + B200, 1.5B | — | **~125 tok/s** | — |
+| Groq + B200, 8B | — | **~91 tok/s** | — |
+| Groq + B200, 70B | — | **~45 tok/s** | — |
+| Groq-native NTT (research) | — | **~330 tok/s** | — |
+
+### Agentic AI Impact (10-step agent, 200 tokens/step)
+
+| Configuration | CuKKS | TenSafe-HE | Viable? |
+|---|---|---|---|
+| A2000 standalone | 4.5 min | 3.7 min | No |
+| Groq + H100, 8B | 83s | **40s** | **Yes (background)** |
+| Groq + B200, 8B | — | **22s** | **Yes (interactive)** |
+| Groq + B200, 70B | — | **44s** | **Yes (background, GPT-4 quality)** |
 
 ---
 
@@ -493,8 +570,8 @@ Weeks 15-16:
 Building TenSafe-HE gives us:
 
 1. **Performance control.** We optimize for our exact operation profile. No library update can break us.
-2. **FPGA path.** Same Rust core + FPGA backend gives us the 30x acceleration path without depending on anyone.
-3. **Groq integration.** Custom library means custom data formats for Groq LPU ↔ HE co-processor.
+2. **Groq-native path.** Custom library means custom data formats optimized for Groq LPU ↔ GPU data path, and a research path toward running NTT on Groq's deterministic architecture directly.
+3. **GPU generation scaling.** Same CUDA kernels benefit automatically from H100 → B200 → next-gen bandwidth improvements.
 4. **IP moat.** A custom HE library optimized for zero-rotation inference is defensible technology.
 5. **Supply chain security.** No dependency on OpenFHE's release cycle or breaking changes.
 6. **Packaging simplicity.** One pip wheel instead of OpenFHE C++ + CUDA runtime + Python bindings chain.

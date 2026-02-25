@@ -371,6 +371,70 @@ function sample(logits, temp = 0.7, topK = 50, topP = 0.9, prevIds = null, repPe
   return N - 1;
 }
 
+/**
+ * Sample from server-side top-K sparse logits (top-256 logit values + their token IDs).
+ * Eliminates the 500ms client-side LM head projection on phone.
+ */
+function sampleFromTopK(topKLogits, topKIds, temp = 0.7, topK = 50, topP = 0.9, prevIds = null, repPenalty = 1.3) {
+  const K = topKLogits.length;
+  const logits = new Float32Array(topKLogits);
+
+  // Repetition penalty on sparse set
+  if (prevIds && prevIds.length > 0 && repPenalty > 1.0) {
+    const seen = new Set(prevIds.slice(-64));
+    for (let i = 0; i < K; i++) {
+      if (seen.has(topKIds[i])) {
+        logits[i] = logits[i] > 0 ? logits[i] / repPenalty : logits[i] * repPenalty;
+      }
+    }
+  }
+
+  // Greedy
+  if (temp <= 0) {
+    let mx = 0;
+    for (let i = 1; i < K; i++) { if (logits[i] > logits[mx]) mx = i; }
+    return topKIds[mx];
+  }
+
+  // Temperature
+  const sc = new Float32Array(K);
+  for (let i = 0; i < K; i++) sc[i] = logits[i] / temp;
+
+  // Top-k mask (if user topK < server K=256)
+  if (topK > 0 && topK < K) {
+    const sorted = Float32Array.from(sc).sort((a, b) => a - b).reverse();
+    const thr = sorted[topK - 1];
+    for (let i = 0; i < K; i++) { if (sc[i] < thr) sc[i] = -Infinity; }
+  }
+
+  // Softmax
+  let mx = -Infinity;
+  for (let i = 0; i < K; i++) { if (sc[i] > mx) mx = sc[i]; }
+  const pr = new Float32Array(K);
+  let sm = 0;
+  for (let i = 0; i < K; i++) { pr[i] = Math.exp(sc[i] - mx); sm += pr[i]; }
+  for (let i = 0; i < K; i++) pr[i] /= sm;
+
+  // Top-p nucleus
+  if (topP < 1.0) {
+    const idx = Array.from({ length: K }, (_, i) => i);
+    idx.sort((a, b) => pr[b] - pr[a]);
+    let cum = 0;
+    const keep = new Set();
+    for (const i of idx) { keep.add(i); cum += pr[i]; if (cum >= topP) break; }
+    sm = 0;
+    for (let i = 0; i < K; i++) { if (!keep.has(i)) pr[i] = 0; else sm += pr[i]; }
+    if (sm === 0) sm = 1;
+    for (let i = 0; i < K; i++) pr[i] /= sm;
+  }
+
+  // Multinomial
+  const r = Math.random();
+  let c = 0;
+  for (let i = 0; i < K; i++) { c += pr[i]; if (r < c) return topKIds[i]; }
+  return topKIds[K - 1];
+}
+
 
 // ================================================================
 // GateLink-Split Inference Client
@@ -410,7 +474,12 @@ class SplitInferenceClient {
     this.HD = cfg.hidden_dim || 1536;
     this.VS = cfg.vocab_size || 151936;
     this.dpEps = cfg.dp_epsilon ?? 1.0;
+    // dp_sigma = server-side DP noise on post-transformer hidden states (for UI display)
+    // client_dp_sigma = phone-side noise on raw embeddings (MUST be 0 — raw embed norms
+    // are ~0.8-1.2, so sigma=4.84 would give SNR=0.005 → pure hallucination).
+    // DP noise is now applied SERVER-SIDE after 28 transformer layers where norms are ~165-190.
     this.dpSigma = cfg.dp_sigma ?? 0;
+    this.dpSigmaEmbed = cfg.client_dp_sigma ?? 0;
     this.dpSens = cfg.dp_sensitivity ?? 1.0;
     this.expertKW = cfg.expert_keywords || {};
     P("config", 1, "Config loaded");
@@ -597,11 +666,18 @@ class SplitInferenceClient {
     return out;
   }
 
-  /** Add DP noise to one embedding. Clips to unit L2 norm first. */
+  /**
+   * Add DP noise to one embedding. Clips to unit L2 norm first.
+   * NOTE: Uses dpSigmaEmbed (= 0 by default), NOT dpSigma (= 4.84).
+   * DP noise is applied SERVER-SIDE on post-transformer hidden states
+   * (norm ~165-190, SNR ~1.0). Applying sigma=4.84 to raw embeddings
+   * (norm ~0.8) gives SNR=0.005 → destroys signal → hallucination.
+   */
   noisify(emb) {
+    if (this.dpSigmaEmbed <= 0) return emb;  // No client-side noise (server handles DP)
     const norm = l2norm(emb);
     const scale = norm > this.dpSens ? (this.dpSens / norm) : 1.0;
-    const noise = gaussNoise(this.HD, this.dpSigma);
+    const noise = gaussNoise(this.HD, this.dpSigmaEmbed);
     const out = new Float32Array(this.HD);
     for (let d = 0; d < this.HD; d++) out[d] = emb[d] * scale + noise[d];
     return out;
@@ -643,14 +719,42 @@ class SplitInferenceClient {
 
     return new Promise((resolve, reject) => {
       const ws = new WebSocket(url);
+      ws.binaryType = "arraybuffer";  // receive binary as ArrayBuffer
       ws.onopen = () => {
         this._ws = ws;
         this._wsReady = true;
-        console.log("[Split-WS] Connected");
+        console.log("[Split-WS] Connected (binary mode)");
         resolve();
       };
       ws.onmessage = (ev) => {
-        const msg = JSON.parse(ev.data);
+        let msg;
+        if (ev.data instanceof ArrayBuffer) {
+          // Binary protocol: [4B json_len][JSON metadata][binary payload]
+          const dv = new DataView(ev.data);
+          const jsonLen = dv.getUint32(0, true);  // little-endian
+          const jsonStr = new TextDecoder().decode(new Uint8Array(ev.data, 4, jsonLen));
+          msg = JSON.parse(jsonStr);
+          const payloadOffset = 4 + jsonLen;
+
+          if (msg.type === "result") {
+            // Parse binary payload: pre_activations[float32] + logits_top_k[float32] + logits_top_ids[int32]
+            const hd = msg.hidden_dim || this.HD;
+            const seqLen = msg.seq_len || 1;
+            const preActBytes = seqLen * hd * 4;
+            msg.pre_activations_f32 = new Float32Array(ev.data, payloadOffset, seqLen * hd);
+
+            if (msg.logits_k && msg.logits_k > 0) {
+              const logitsOffset = payloadOffset + preActBytes;
+              const K = msg.logits_k;
+              msg.logits_top_k = Array.from(new Float32Array(ev.data, logitsOffset, K));
+              msg.logits_top_ids = Array.from(new Int32Array(ev.data, logitsOffset + K * 4, K));
+            }
+            msg._binary = true;  // flag for downstream code
+          }
+        } else {
+          // Text protocol (fallback)
+          msg = JSON.parse(ev.data);
+        }
         if (msg.type === "pong") return;
         if (msg.type === "error" && this._wsPending) {
           this._wsPending.reject(new Error(msg.message));
@@ -679,7 +783,7 @@ class SplitInferenceClient {
     });
   }
 
-  /** Send a message over WS and wait for response. */
+  /** Send a message over WS and wait for response (text JSON mode). */
   _wsSend(msg) {
     return new Promise((resolve, reject) => {
       if (!this._ws || this._ws.readyState !== WebSocket.OPEN) {
@@ -697,17 +801,39 @@ class SplitInferenceClient {
     });
   }
 
+  /** Send binary frame: [4B json_len][JSON metadata][raw float32 payload] */
+  _wsSendBinary(metadata, float32Array) {
+    return new Promise((resolve, reject) => {
+      if (!this._ws || this._ws.readyState !== WebSocket.OPEN) {
+        reject(new Error("WebSocket not connected"));
+        return;
+      }
+      this._wsPending = { resolve, reject };
+      const jsonBytes = new TextEncoder().encode(JSON.stringify(metadata));
+      const buf = new ArrayBuffer(4 + jsonBytes.length + float32Array.byteLength);
+      const dv = new DataView(buf);
+      dv.setUint32(0, jsonBytes.length, true);  // little-endian
+      new Uint8Array(buf, 4, jsonBytes.length).set(jsonBytes);
+      new Uint8Array(buf, 4 + jsonBytes.length).set(new Uint8Array(float32Array.buffer));
+      this._ws.send(buf);
+      setTimeout(() => {
+        if (this._wsPending) {
+          this._wsPending.reject(new Error("WS binary forward timeout (30s)"));
+          this._wsPending = null;
+        }
+      }, 30000);
+    });
+  }
+
   // -------- Server communication --------
 
   async serverForward(noisedFlat, seqLen, expert, useHE, sessionId, incremental) {
-    const b64 = ab2b64(noisedFlat.buffer);
-
     if (this._abort && this._abort.signal.aborted) {
       throw new Error("Generation aborted");
     }
 
-    const payload = {
-      hidden_states_b64: b64,
+    const metadata = {
+      type: "forward",
       seq_len: seqLen,
       hidden_dim: this.HD,
       expert_name: expert,
@@ -716,15 +842,19 @@ class SplitInferenceClient {
       incremental: !!incremental,
     };
 
-    // Prefer WebSocket if connected (eliminates HTTP overhead)
+    // Prefer binary WebSocket (no base64, ~5ms faster per token)
     if (this._wsReady && this._ws && this._ws.readyState === WebSocket.OPEN) {
       try {
-        return await this._wsSend({ type: "forward", ...payload });
+        return await this._wsSendBinary(metadata, noisedFlat);
       } catch (e) {
-        console.warn("[Split-WS] Forward failed, falling back to HTTP:", e.message);
+        console.warn("[Split-WS] Binary forward failed, falling back to HTTP:", e.message);
         this._wsReady = false;
       }
     }
+
+    // HTTP fallback needs base64
+    const b64 = ab2b64(noisedFlat.buffer);
+    const payload = { ...metadata, hidden_states_b64: b64 };
 
     // HTTP fallback (original path)
     const controller = new AbortController();
@@ -898,43 +1028,64 @@ class SplitInferenceClient {
       }
       const srvMs = performance.now() - srvT;
 
-      // 3c. Decode pre-activations
-      status("project", "LM head projection (client-side)...");
+      // 3c. LM head projection — prefer server-side top-256 logits (GPU ~5ms)
+      //     Falls back to client-side matmul (~500ms on phone) if unavailable
       const projT = performance.now();
+      let nextId, projMs, usedServerLogits = false;
 
-      const preActBuf = b642ab(result.pre_activations_b64);
-      const preActF32 = new Float32Array(preActBuf);
-
-      // In incremental mode, server returns only last position's hidden state
-      // In full mode, extract from the full sequence output
-      let lastH;
-      if (result.incremental) {
-        // Server returned [1, 1, HD] — just the last token
-        lastH = preActF32.slice(0, this.HD);
+      if (result.logits_top_k && result.logits_top_ids) {
+        // Server already computed top-256 logits via GPU LM head — skip local matmul
+        status("project", "Sampling (server-side LM head)...");
+        nextId = sampleFromTopK(
+          result.logits_top_k, result.logits_top_ids,
+          temperature, topK, topP, curIds, 1.3
+        );
+        projMs = performance.now() - projT;
+        usedServerLogits = true;
       } else {
-        const lastOff = (sendSeqLen - 1) * this.HD;
-        lastH = preActF32.slice(lastOff, lastOff + this.HD);
+        // Fallback: client-side LM head projection (tied weights, ~0.5s on iPhone)
+        status("project", "LM head projection (client-side)...");
+
+        // Support both binary (pre_activations_f32) and text (pre_activations_b64)
+        let preActF32;
+        if (result._binary && result.pre_activations_f32) {
+          preActF32 = result.pre_activations_f32;
+        } else {
+          const preActBuf = b642ab(result.pre_activations_b64);
+          preActF32 = new Float32Array(preActBuf);
+        }
+
+        let lastH;
+        if (result.incremental) {
+          lastH = preActF32.slice(0, this.HD);
+        } else {
+          const lastOff = (sendSeqLen - 1) * this.HD;
+          lastH = preActF32.slice(lastOff, lastOff + this.HD);
+        }
+
+        const logits = this.project(lastH);
+        projMs = performance.now() - projT;
+        nextId = sample(logits, temperature, topK, topP, curIds, 1.3);
       }
-
-      // LM head projection (tied weights, ~0.5s on iPhone)
-      const logits = this.project(lastH);
-      const projMs = performance.now() - projT;
-
-      // 3d. Sample next token (with repetition penalty over last 64 tokens)
-      const nextId = sample(logits, temperature, topK, topP, curIds, 1.3);
       const tokText = this.tokenizer.decode([nextId]);
 
       // Diagnostic: log first few tokens for debugging
       if (step < 5) {
-        const topIds = [];
-        const logitsCopy = Float32Array.from(logits);
-        for (let t = 0; t < 5; t++) {
-          let mx = 0;
-          for (let i = 1; i < logitsCopy.length; i++) { if (logitsCopy[i] > logitsCopy[mx]) mx = i; }
-          topIds.push({ id: mx, logit: logitsCopy[mx].toFixed(2), tok: this.tokenizer.decode([mx]) });
-          logitsCopy[mx] = -Infinity;
+        if (usedServerLogits) {
+          // Show top-5 from server's top-256
+          const topIds = [];
+          const vals = [...result.logits_top_k];
+          const ids = [...result.logits_top_ids];
+          for (let t = 0; t < Math.min(5, vals.length); t++) {
+            let mx = 0;
+            for (let i = 1; i < vals.length; i++) { if (vals[i] > vals[mx]) mx = i; }
+            topIds.push({ id: ids[mx], logit: vals[mx].toFixed(2), tok: this.tokenizer.decode([ids[mx]]) });
+            vals[mx] = -Infinity;
+          }
+          console.log(`[Split] Step ${step} (server LM): nextId=${nextId} tok=${JSON.stringify(tokText)} top5=`, topIds);
+        } else {
+          console.log(`[Split] Step ${step} (client LM): nextId=${nextId} tok=${JSON.stringify(tokText)} projMs=${projMs.toFixed(0)}`);
         }
-        console.log(`[Split] Step ${step}: nextId=${nextId} tok=${JSON.stringify(tokText)} top5=`, topIds);
       }
 
       // Stop on EOS, <|im_end|>, or "###" (new section = end of response)
@@ -978,6 +1129,8 @@ class SplitInferenceClient {
         dpSigma: this.dpSigma,
         incremental: !!result.incremental,
         cachedSeqLen: result.cached_seq_len || 0,
+        serverLmHead: usedServerLogits,
+        lmHeadMs: result.lm_head_ms || 0,
       };
       allMetrics.push(metrics);
       if (onToken) onToken(tokText, metrics);

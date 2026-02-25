@@ -61,6 +61,7 @@
     "client_layers": 1,
     "dp_epsilon": 1.0,
     "max_epsilon": 10.0,
-    "max_lora_rank": 32
+    "max_lora_rank": 32,
+    "target_lora_rank": 32
   }
 }

@@ -228,9 +228,18 @@ async def split_stream(ws: WebSocket):
     """WebSocket endpoint for split inference.
 
     Eliminates per-token HTTP overhead by keeping a persistent connection.
-    Protocol:
+    Supports BOTH text (JSON+base64) and binary protocols:
+
+    Text protocol (backward compatible):
       Client -> Server:  {"type": "forward", "hidden_states_b64": "...", ...}
       Server -> Client:  {"type": "result", "pre_activations_b64": "...", ...}
+
+    Binary protocol (faster, no base64 overhead):
+      Client -> Server:  [4B json_len][JSON metadata][raw float32 hidden_states]
+      Server -> Client:  [4B json_len][JSON metadata][raw float32 pre_activations]
+                         [raw float32 logits_top_k][raw int32 logits_top_ids]
+      JSON metadata contains type, metrics, dimensions.
+
       Client -> Server:  {"type": "ping"}
       Server -> Client:  {"type": "pong"}
     """
@@ -238,9 +247,23 @@ async def split_stream(ws: WebSocket):
     logger.info("Split-WS client connected")
     try:
         while True:
-            raw = await ws.receive_text()
-            msg = json.loads(raw)
-            msg_type = msg.get("type", "forward")
+            # Accept BOTH text and binary frames
+            ws_msg = await ws.receive()
+            if "text" in ws_msg and ws_msg["text"]:
+                raw = ws_msg["text"]
+                msg = json.loads(raw)
+                msg_type = msg.get("type", "forward")
+                binary_mode = False
+            elif "bytes" in ws_msg and ws_msg["bytes"]:
+                # Binary protocol: [4B json_len][JSON][float32 payload]
+                raw_bytes = ws_msg["bytes"]
+                json_len = int.from_bytes(raw_bytes[:4], "little")
+                msg = json.loads(raw_bytes[4 : 4 + json_len])
+                binary_payload = raw_bytes[4 + json_len :]
+                msg_type = msg.get("type", "forward")
+                binary_mode = True
+            else:
+                continue
 
             if msg_type == "ping":
                 await ws.send_text(json.dumps({"type": "pong"}))
@@ -297,7 +320,6 @@ async def split_stream(ws: WebSocket):
                 continue
 
             try:
-                h_b64 = msg.get("hidden_states_b64", "")
                 seq_len = min(max(int(msg.get("seq_len", 1)), 1), 4096)
                 hidden_dim = int(msg.get("hidden_dim", engine.model.config.hidden_size))
                 expert_name = str(msg.get("expert_name", "shared_attention"))[:128]
@@ -305,8 +327,13 @@ async def split_stream(ws: WebSocket):
                 session_id = str(msg.get("session_id", "default"))[:128]
                 incremental = bool(msg.get("incremental", False))
 
-                h_bytes = base64.b64decode(h_b64)
-                h_np = np.frombuffer(h_bytes, dtype=np.float32).reshape(seq_len, hidden_dim)
+                # Decode hidden states: binary payload or base64 JSON field
+                if binary_mode:
+                    h_np = np.frombuffer(binary_payload, dtype=np.float32).reshape(seq_len, hidden_dim)
+                else:
+                    h_b64 = msg.get("hidden_states_b64", "")
+                    h_bytes = base64.b64decode(h_b64)
+                    h_np = np.frombuffer(h_bytes, dtype=np.float32).reshape(seq_len, hidden_dim)
 
                 async with _gen_semaphore:
                     result = engine.split_forward(
@@ -317,15 +344,13 @@ async def split_stream(ws: WebSocket):
                         incremental=incremental,
                     )
 
-                pre_np = result["pre_activations"]
-                pre_b64 = base64.b64encode(
-                    pre_np.astype(np.float32).tobytes()
-                ).decode()
+                pre_np = result["pre_activations"].astype(np.float32)
 
-                await ws.send_text(json.dumps({
+                # Build response metadata (no base64 in binary mode)
+                resp = {
                     "type": "result",
-                    "pre_activations_b64": pre_b64,
                     "seq_len": pre_np.shape[0] if pre_np.ndim > 1 else 1,
+                    "hidden_dim": hidden_dim,
                     "he_active": result.get("he_active", False),
                     "encrypt_ms": result.get("encrypt_ms", 0),
                     "compute_ms": result.get("compute_ms", 0),
@@ -336,7 +361,35 @@ async def split_stream(ws: WebSocket):
                     "incremental": result.get("incremental", False),
                     "cached_seq_len": result.get("cached_seq_len", 0),
                     "layers_computed": result.get("layers_computed", 0),
-                }, default=str))
+                }
+
+                has_logits = result.get("logits_top_k") is not None
+                if has_logits:
+                    resp["lm_head_ms"] = result.get("lm_head_ms", 0)
+                    resp["logits_k"] = len(result["logits_top_k"])
+
+                if binary_mode:
+                    # Binary response: [4B json_len][JSON][float32 pre_act]
+                    #   [float32 logits_top_k][int32 logits_top_ids]
+                    json_bytes = json.dumps(resp, default=str).encode()
+                    parts = [
+                        len(json_bytes).to_bytes(4, "little"),
+                        json_bytes,
+                        pre_np.tobytes(),
+                    ]
+                    if has_logits:
+                        parts.append(np.array(result["logits_top_k"], dtype=np.float32).tobytes())
+                        parts.append(np.array(result["logits_top_ids"], dtype=np.int32).tobytes())
+                    await ws.send_bytes(b"".join(parts))
+                else:
+                    # Text response (backward compatible)
+                    resp["pre_activations_b64"] = base64.b64encode(
+                        pre_np.tobytes()
+                    ).decode()
+                    if has_logits:
+                        resp["logits_top_k"] = result["logits_top_k"]
+                        resp["logits_top_ids"] = result["logits_top_ids"]
+                    await ws.send_text(json.dumps(resp, default=str))
 
             except Exception as exc:
                 logger.exception("Split-WS forward error: %s" % exc)
@@ -502,18 +555,34 @@ async def split_config():
         "vocab_size": 151936,
         "num_layers": 28,
         "client_layers": glc.get("client_layers", 1),
-        # Split-mode DP: NOW ENABLED — noise injected on post-transformer
-        # hidden states (same as WebSocket mode), NOT on fragile embeddings.
+        # Split-mode DP: noise injected SERVER-SIDE on post-transformer
+        # hidden states (norm ~165-190), NOT on phone-side raw embeddings
+        # (norm ~0.8-1.2). client_dp_sigma=0 tells the phone to skip noisify().
         "dp_epsilon": engine._dp_epsilon if engine else 0.0,
         "dp_delta": engine._dp_delta if engine else 1e-5,
         "dp_sigma": round(engine._dp_sigma, 6) if engine else 0.0,
+        "client_dp_sigma": 0.0,  # Phone must NOT noise raw embeddings (SNR=0.005 → hallucination)
         "dp_sensitivity": engine._dp_sensitivity if engine else 1.0,
         "max_epsilon": engine._max_epsilon if engine else 10.0,
         "experts": list(engine.adapters.keys()) if engine else [],
         "expert_keywords": expert_keywords,
         "simd_slots": engine.simd_slots if engine else 0,
         "he_active": engine.he_ctx is not None if engine else False,
+        "lora_rank": _get_effective_lora_rank(engine),
+        "target_lora_rank": glc.get("target_lora_rank", 32),
     }
+
+
+def _get_effective_lora_rank(eng) -> int:
+    """Return the actual LoRA rank after SVD truncation."""
+    if not eng or not eng.adapters:
+        return 0
+    for adp in eng.adapters.values():
+        w = adp.get("weights", {})
+        a = w.get("lora_A")
+        if a is not None:
+            return a.shape[0] if hasattr(a, "shape") else 0
+    return 0
 
 
 # ======================================================================
@@ -783,33 +852,54 @@ async def split_selftest(query: str = "What is a savings account?"):
                     incremental=incremental,
                 )
 
-                # Extract last hidden state (same as JS client)
-                pre_act = result["pre_activations"]  # float32 numpy
-                if result.get("incremental"):
-                    last_h = pre_act.flatten()[:HD]
+                # Prefer server-side top-256 logits (GPU, ~5ms) over
+                # numpy LM head projection (~500ms per token)
+                if result.get("logits_top_k") is not None:
+                    top_k = np.array(result["logits_top_k"], dtype=np.float32)
+                    top_ids = np.array(result["logits_top_ids"], dtype=np.int32)
+                    next_id = int(top_ids[np.argmax(top_k)])
+                    # For diagnostics, build sparse logits view
+                    logits_sparse = (top_k, top_ids)
                 else:
-                    last_h = pre_act.reshape(-1, HD)[-1]
-
-                # Project through LM head using same float16 weights
-                logits = project_from_bin_fast(last_h.astype(np.float32))
-
-                # Greedy sample (temperature=0)
-                next_id = int(np.argmax(logits))
+                    # Fallback: numpy LM head projection (same as JS project())
+                    pre_act = result["pre_activations"]
+                    if result.get("incremental"):
+                        last_h = pre_act.flatten()[:HD]
+                    else:
+                        last_h = pre_act.reshape(-1, HD)[-1]
+                    logits_full = project_from_bin_fast(last_h.astype(np.float32))
+                    next_id = int(np.argmax(logits_full))
+                    logits_sparse = None
 
                 # Diagnostic for first 5 tokens
                 if step < 5:
-                    top5_ids = np.argsort(logits)[-5:][::-1]
-                    top5_info = [
-                        {"id": int(i), "logit": f"{logits[i]:.2f}",
-                         "tok": engine.tokenizer.decode([int(i)])}
-                        for i in top5_ids
-                    ]
+                    if logits_sparse is not None:
+                        top_k_v, top_k_i = logits_sparse
+                        sort_idx = np.argsort(top_k_v)[-5:][::-1]
+                        top5_info = [
+                            {"id": int(top_k_i[i]), "logit": f"{top_k_v[i]:.2f}",
+                             "tok": engine.tokenizer.decode([int(top_k_i[i])])}
+                            for i in sort_idx
+                        ]
+                    else:
+                        top5_ids = np.argsort(logits_full)[-5:][::-1]
+                        top5_info = [
+                            {"id": int(i), "logit": f"{logits_full[i]:.2f}",
+                             "tok": engine.tokenizer.decode([int(i)])}
+                            for i in top5_ids
+                        ]
+                    # Compute h_norm from pre_activations
+                    pre_act = result["pre_activations"]
+                    if result.get("incremental"):
+                        h_for_norm = pre_act.flatten()[:HD]
+                    else:
+                        h_for_norm = pre_act.reshape(-1, HD)[-1]
                     diag_steps.append({
                         "step": step,
                         "next_id": next_id,
                         "token": engine.tokenizer.decode([next_id]),
                         "top5": top5_info,
-                        "h_norm": f"{np.linalg.norm(last_h):.2f}",
+                        "h_norm": f"{np.linalg.norm(h_for_norm):.2f}",
                         "he_active": result.get("he_active", False),
                         "dp_sigma": result.get("dp_sigma", 0.0),
                     })
@@ -967,4 +1057,4 @@ if _FRONTEND.exists():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8090)
+    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", "8095")))

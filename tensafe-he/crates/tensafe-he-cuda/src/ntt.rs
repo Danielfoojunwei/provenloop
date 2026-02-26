@@ -15,7 +15,7 @@ use tensafe_he_core::ntt::NttTables;
 use tensafe_he_core::params::Modulus;
 
 use crate::kernels::MODULE;
-use crate::{launch_cfg, GpuResult, BLOCK_SIZE};
+use crate::{launch_cfg, GpuResult};
 
 /// GPU-resident NTT tables for a single (N, q) pair.
 ///
@@ -92,7 +92,7 @@ impl GpuNttTables {
                 f.launch(
                     butterfly_cfg,
                     (
-                        data,
+                        &mut *data,
                         &self.forward_twiddles,
                         self.q,
                         self.barrett_hi,
@@ -130,7 +130,7 @@ impl GpuNttTables {
                 f.launch(
                     butterfly_cfg,
                     (
-                        data,
+                        &mut *data,
                         &self.inverse_twiddles,
                         self.q,
                         self.barrett_hi,
@@ -149,7 +149,7 @@ impl GpuNttTables {
         unsafe {
             f.launch(
                 scale_cfg,
-                (data, self.n_inv, self.q, self.barrett_hi, self.n as u32),
+                (&mut *data, self.n_inv, self.q, self.barrett_hi, self.n as u32),
             )?;
         }
 

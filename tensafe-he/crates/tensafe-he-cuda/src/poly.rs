@@ -3,7 +3,7 @@
 //! [`GpuRnsPoly`] mirrors [`tensafe_he_core::rns::RnsPoly`] but lives entirely in GPU memory.
 //! Each RNS limb is a separate `CudaSlice<u64>` of N coefficients for coalesced access.
 
-use cudarc::driver::{CudaDevice, CudaSlice, LaunchAsync, LaunchConfig};
+use cudarc::driver::{CudaDevice, CudaSlice, LaunchAsync};
 use std::sync::Arc;
 use tensafe_he_core::params::Modulus;
 use tensafe_he_core::rns::RnsPoly;

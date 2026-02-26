@@ -16,7 +16,7 @@ use tensafe_he_core::encoding::CkksEncoder;
 use tensafe_he_core::ntt::NttTables;
 use tensafe_he_core::params::{CkksParams, SCALE};
 use tensafe_he_core::rns::RnsPoly;
-use tensafe_he_core::sampling::{sample_gaussian, sample_ternary, sample_uniform, ERROR_STD_DEV};
+use tensafe_he_core::sampling::{sample_gaussian_signed, sample_ternary, sample_uniform, ERROR_STD_DEV};
 
 use crate::kernels::{KERNEL_NAMES, KERNEL_SOURCE, MODULE};
 use crate::ntt::GpuNttTables;
@@ -153,12 +153,25 @@ impl GpuCkksContext {
         let m_cpu = self.encoder.encode(z, &self.params);
 
         // 2. Sample a and e on CPU
+        // a is sampled independently per limb (CRT-uniform, cancels in decrypt)
         let mut a_cpu = RnsPoly::zero(n, num_limbs);
-        let mut e_cpu = RnsPoly::zero(n, num_limbs);
         for l in 0..num_limbs {
             let q = self.params.moduli[l].value;
             a_cpu.limbs[l] = sample_uniform(rng, n, q);
-            e_cpu.limbs[l] = sample_gaussian(rng, n, q, ERROR_STD_DEV);
+        }
+
+        // e must be consistent across limbs (same signed integers reduced mod each q)
+        let e_signed = sample_gaussian_signed(rng, n, ERROR_STD_DEV);
+        let mut e_cpu = RnsPoly::zero(n, num_limbs);
+        for l in 0..num_limbs {
+            let q = self.params.moduli[l].value;
+            for i in 0..n {
+                e_cpu.limbs[l][i] = if e_signed[i] >= 0 {
+                    (e_signed[i] as u64) % q
+                } else {
+                    q - ((-e_signed[i]) as u64 % q)
+                };
+            }
         }
 
         // 3. Upload m, a, e to GPU
@@ -241,7 +254,7 @@ impl GpuCkksContext {
 
         // 3. Download to CPU and decode
         let m_cpu = m_gpu.to_host(&self.dev)?;
-        Ok(self.encoder.decode(&m_cpu, &self.params))
+        Ok(self.encoder.decode(&m_cpu, &self.params, ct.scale))
     }
 
     /// Ciphertext × plaintext multiply.
@@ -317,5 +330,105 @@ impl GpuCkksContext {
             c1: ct.c1.to_host(&self.dev)?,
             scale: ct.scale,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rand::SeedableRng;
+    use rand::rngs::StdRng;
+
+    /// Helper: try to init GPU, skip test gracefully if no GPU available.
+    /// cudarc panics (instead of returning Err) when the CUDA driver is missing,
+    /// so we catch the panic with std::panic::catch_unwind.
+    fn gpu_ctx() -> Option<GpuCkksContext> {
+        let result = std::panic::catch_unwind(|| {
+            let params = CkksParams::for_degree(8192);
+            GpuCkksContext::new(params, 0)
+        });
+        match result {
+            Ok(Ok(ctx)) => Some(ctx),
+            Ok(Err(e)) => {
+                eprintln!("Skipping GPU test (CUDA error): {e}");
+                None
+            }
+            Err(_) => {
+                eprintln!("Skipping GPU test (no CUDA driver / no GPU in this container)");
+                None
+            }
+        }
+    }
+
+    #[test]
+    fn test_gpu_encrypt_decrypt_roundtrip() {
+        let Some(ctx) = gpu_ctx() else { return };
+        let mut rng = StdRng::seed_from_u64(42);
+        let sk = ctx.keygen(&mut rng).unwrap();
+
+        let x: Vec<f64> = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+        let ct = ctx.encrypt(&x, &sk, &mut rng).unwrap();
+        let decoded = ctx.decrypt(&ct, &sk).unwrap();
+
+        for i in 0..x.len() {
+            let err = (decoded[i] - x[i]).abs();
+            assert!(
+                err < 0.1,
+                "Slot {i}: decoded={}, expected={}, error={err}",
+                decoded[i], x[i]
+            );
+        }
+        eprintln!("GPU encrypt/decrypt roundtrip: PASSED");
+    }
+
+    #[test]
+    fn test_gpu_ct_pt_multiply() {
+        let Some(ctx) = gpu_ctx() else { return };
+        let mut rng = StdRng::seed_from_u64(42);
+        let sk = ctx.keygen(&mut rng).unwrap();
+
+        let x: Vec<f64> = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+        let p: Vec<f64> = vec![0.5, 0.5, 0.5, 0.5, 0.5];
+        let expected: Vec<f64> = x.iter().zip(p.iter()).map(|(a, b)| a * b).collect();
+
+        let ct = ctx.encrypt(&x, &sk, &mut rng).unwrap();
+        let ct_prod = ctx.ct_pt_mul(&ct, &p).unwrap();
+        let decoded = ctx.decrypt(&ct_prod, &sk).unwrap();
+
+        for i in 0..expected.len() {
+            let err = (decoded[i] - expected[i]).abs();
+            assert!(
+                err < 0.1,
+                "Slot {i}: decoded={}, expected={}, error={err}",
+                decoded[i], expected[i]
+            );
+        }
+        eprintln!("GPU ct*pt multiply: PASSED");
+    }
+
+    #[test]
+    fn test_gpu_cached_ntt_multiply() {
+        let Some(ctx) = gpu_ctx() else { return };
+        let mut rng = StdRng::seed_from_u64(42);
+        let sk = ctx.keygen(&mut rng).unwrap();
+
+        let x: Vec<f64> = (0..20).map(|i| (i as f64) * 0.1).collect();
+        let p: Vec<f64> = (0..20).map(|i| 1.0 - (i as f64) * 0.04).collect();
+        let expected: Vec<f64> = x.iter().zip(p.iter()).map(|(a, b)| a * b).collect();
+
+        let ct = ctx.encrypt(&x, &sk, &mut rng).unwrap();
+        let w_ntt = ctx.encode_to_ntt(&p).unwrap();
+        let ct_prod = ctx.ct_pt_mul_ntt(&ct, &w_ntt).unwrap();
+        let decoded = ctx.decrypt(&ct_prod, &sk).unwrap();
+
+        for i in 0..expected.len() {
+            let err = (decoded[i] - expected[i]).abs();
+            assert!(
+                err < 0.1,
+                "Slot {i}: decoded={}, expected={}, error={err}",
+                decoded[i], expected[i]
+            );
+        }
+        eprintln!("GPU cached NTT multiply: PASSED");
     }
 }

@@ -1389,6 +1389,7 @@ class FinanceInferenceEngine:
             he_ops = 0
             gate_val = 0.0
             dp_sigma_actual = 0.0
+            delta = None
 
             if he_on and active_expert in self.adapters:
                 # Get hidden state as numpy (1536-dim)

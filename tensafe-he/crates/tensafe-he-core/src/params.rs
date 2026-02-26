@@ -18,23 +18,27 @@ pub struct Modulus {
     pub value: u64,
     /// Bit width of this modulus.
     pub bits: u32,
-    /// Barrett constant: floor(2^128 / q_i), stored as high 64 bits.
-    /// Used for fast modular reduction: floor(a * barrett_hi >> 64) ≈ floor(a / q_i).
+    /// Barrett constant: floor(2^128 / q_i), stored as two 64-bit words.
+    /// barrett_hi is the high word, barrett_lo is the low word.
+    /// Together they represent the full ~68-bit constant needed for 60-bit moduli.
     pub barrett_hi: u64,
+    /// Low 64 bits of floor(2^128 / q_i).
+    pub barrett_lo: u64,
 }
 
 impl Modulus {
     /// Create a new modulus with pre-computed Barrett constant.
     pub const fn new(value: u64, bits: u32) -> Self {
-        // Barrett constant = floor(2^128 / q).
-        // We compute floor(2^64 * (2^64 / q)) = floor(2^128 / q) truncated to 64 bits.
-        // For compile-time: use integer division 2^127 / q * 2, with correction.
-        let hi = u128::MAX / (value as u128);
-        let barrett_hi = (hi >> 64) as u64;
+        // Barrett constant = floor(2^128 / q), stored as (hi, lo) pair.
+        // For q ≈ 2^60, this is about 2^68 which needs both words.
+        let full = u128::MAX / (value as u128);
+        let barrett_hi = (full >> 64) as u64;
+        let barrett_lo = full as u64;
         Self {
             value,
             bits,
             barrett_hi,
+            barrett_lo,
         }
     }
 }
@@ -130,6 +134,83 @@ impl CkksParams {
             _ => panic!("Unsupported polynomial degree {n}. Use 8192, 16384, or 32768."),
         }
     }
+
+    /// Build a custom parameter set with given modulus bit widths.
+    ///
+    /// Automatically finds NTT-friendly primes for each width.
+    /// This allows runtime selection of depth/security trade-offs.
+    pub fn custom(poly_degree: usize, modulus_bits: &[u32], scale_bits: u32) -> Self {
+        assert!(poly_degree.is_power_of_two(), "poly_degree must be a power of 2");
+        let two_n = (2 * poly_degree) as u64;
+
+        let moduli: Vec<Modulus> = modulus_bits
+            .iter()
+            .map(|&bits| {
+                let q = find_ntt_friendly_prime(bits, two_n);
+                Modulus::new(q, bits)
+            })
+            .collect();
+
+        Self {
+            poly_degree,
+            num_slots: poly_degree / 2,
+            log_n: poly_degree.trailing_zeros(),
+            num_limbs: moduli.len(),
+            moduli,
+            scale_bits,
+        }
+    }
+}
+
+/// Find a prime q with `bits` bit-width such that q ≡ 1 (mod two_n).
+///
+/// Searches downward from the largest `bits`-bit number for primes
+/// that are NTT-friendly (q - 1 divisible by 2N).
+fn find_ntt_friendly_prime(bits: u32, two_n: u64) -> u64 {
+    let upper = if bits >= 64 {
+        u64::MAX
+    } else {
+        (1u64 << bits) - 1
+    };
+    let lower = 1u64 << (bits - 1);
+
+    // Start from the largest candidate ≡ 1 mod two_n
+    let mut candidate = upper - (upper % two_n) + 1;
+    if candidate > upper {
+        candidate -= two_n;
+    }
+
+    while candidate >= lower {
+        if is_prime_u64(candidate) {
+            return candidate;
+        }
+        candidate = candidate.wrapping_sub(two_n);
+        if candidate < lower {
+            break;
+        }
+    }
+    panic!("No {bits}-bit NTT-friendly prime found for 2N={two_n}");
+}
+
+/// Simple primality test sufficient for 60-bit moduli.
+fn is_prime_u64(n: u64) -> bool {
+    if n < 2 {
+        return false;
+    }
+    if n == 2 || n == 3 {
+        return true;
+    }
+    if n % 2 == 0 || n % 3 == 0 {
+        return false;
+    }
+    let mut i = 5u64;
+    while i.saturating_mul(i) <= n {
+        if n % i == 0 || n % (i + 2) == 0 {
+            return false;
+        }
+        i += 6;
+    }
+    true
 }
 
 #[cfg(test)]
@@ -207,6 +288,24 @@ mod tests {
             // Barrett constant should be approximately 2^64 / q
             let expected = (u128::MAX / m.value as u128) >> 64;
             assert_eq!(m.barrett_hi, expected as u64);
+        }
+    }
+
+    #[test]
+    fn test_custom_params() {
+        let p = CkksParams::custom(16384, &[60, 40, 40, 60], 40);
+        assert_eq!(p.poly_degree, 16384);
+        assert_eq!(p.num_slots, 8192);
+        assert_eq!(p.num_limbs, 4);
+        assert_eq!(p.log_n, 14);
+
+        // Verify all found primes are NTT-friendly
+        let two_n = (2 * p.poly_degree) as u64;
+        for (i, m) in p.moduli.iter().enumerate() {
+            assert_eq!(
+                m.value % two_n, 1,
+                "Custom modulus {i} is not NTT-friendly"
+            );
         }
     }
 }

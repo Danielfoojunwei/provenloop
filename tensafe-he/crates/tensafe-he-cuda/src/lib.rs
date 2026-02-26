@@ -60,7 +60,7 @@ pub mod ntt;
 pub mod context;
 
 // Re-export main types for convenience.
-pub use context::{GpuCkksContext, GpuCiphertext, GpuSecretKey};
+pub use context::{GpuCkksContext, GpuCiphertext, GpuSecretKey, GpuPublicKey};
 pub use ntt::GpuNttTables;
 pub use poly::GpuRnsPoly;
 

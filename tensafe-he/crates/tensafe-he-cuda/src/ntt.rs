@@ -68,12 +68,9 @@ impl GpuNttTables {
 
     /// In-place negacyclic forward NTT on GPU (Cooley-Tukey, SEAL-style).
     ///
-    /// The ψ-based twiddle factors bake the negacyclic twist into the butterfly.
-    /// No separate twist kernel needed.
-    ///
-    /// Stage s: m = 1 << s groups, t = N >> (s+1) half-group size.
-    /// Twiddle for group i = forward_twiddles[m + i].
-    /// Each stage launches N/2 threads (one per butterfly).
+    /// Uses fused shared-memory kernel for stages where butterfly span fits
+    /// in a thread block (last ~9 stages), reducing total launches from
+    /// log_n (~14) to ~6.
     pub fn negacyclic_ntt_forward(
         &self,
         data: &mut CudaSlice<u64>,
@@ -81,12 +78,18 @@ impl GpuNttTables {
     ) -> GpuResult<()> {
         let half_n = (self.n / 2) as u32;
         let butterfly_cfg = launch_cfg(half_n);
+        let block_size = crate::BLOCK_SIZE;
 
+        // Determine first fused stage: t <= BLOCK_SIZE
+        // At stage s: t = N >> (s+1). Fuse when t <= block_size.
+        // first_fused_stage = log_n - log2(block_size) - 1 + 1 = log_n - log2(block_size)
+        let log_block = block_size.trailing_zeros();
+        let first_fused = if self.log_n > log_block { self.log_n - log_block } else { 0 };
+
+        // Global stages (t > block_size): individual kernel launches
         let mut t = (self.n >> 1) as u32;
         let mut m = 1u32;
-
-        for _ in 0..self.log_n {
-            // tw_offset = m (twiddle index base for this stage)
+        for _ in 0..first_fused {
             let f = dev.get_func(MODULE, "ntt_fwd_stage").unwrap();
             unsafe {
                 f.launch(
@@ -104,14 +107,39 @@ impl GpuNttTables {
             t >>= 1;
             m <<= 1;
         }
+
+        // Fused stages (t <= block_size): one shared-memory kernel launch
+        if first_fused < self.log_n {
+            let num_blocks = (self.n as u32) / (2 * block_size);
+            let fused_cfg = cudarc::driver::LaunchConfig {
+                grid_dim: (num_blocks.max(1), 1, 1),
+                block_dim: (block_size, 1, 1),
+                shared_mem_bytes: 2 * block_size * 8, // 2B u64 elements
+            };
+            let f = dev.get_func(MODULE, "ntt_fwd_fused").unwrap();
+            unsafe {
+                f.launch(
+                    fused_cfg,
+                    (
+                        &mut *data,
+                        &self.forward_twiddles,
+                        self.q,
+                        self.barrett_hi,
+                        self.log_n,
+                        first_fused,
+                    ),
+                )?;
+            }
+        }
+
         Ok(())
     }
 
     /// In-place negacyclic inverse NTT on GPU (Gentleman-Sande, SEAL-style).
     ///
-    /// Stage s: m = N >> (s+1) groups, t = 1 << s half-group size.
-    /// Twiddle for group i = inverse_twiddles[m + i].
-    /// Includes N^{-1} normalization.
+    /// Uses fused shared-memory kernel for stages where butterfly span fits
+    /// in a thread block (first ~9 stages for inverse), then individual
+    /// launches for remaining stages.
     pub fn negacyclic_ntt_inverse(
         &self,
         data: &mut CudaSlice<u64>,
@@ -119,12 +147,40 @@ impl GpuNttTables {
     ) -> GpuResult<()> {
         let half_n = (self.n / 2) as u32;
         let butterfly_cfg = launch_cfg(half_n);
+        let block_size = crate::BLOCK_SIZE;
 
-        let mut t = 1u32;
-        let mut m = (self.n >> 1) as u32;
+        // For inverse NTT: t starts at 1 and doubles.
+        // Fuse stages where t <= block_size (first log2(block_size)+1 stages).
+        let log_block = block_size.trailing_zeros();
+        let num_fused = (log_block + 1).min(self.log_n);
 
-        for _ in 0..self.log_n {
-            // tw_offset = m (twiddle index base for this stage)
+        // Fused stages (t = 1 to block_size): one shared-memory kernel
+        if num_fused > 0 {
+            let num_blocks = (self.n as u32) / (2 * block_size);
+            let fused_cfg = cudarc::driver::LaunchConfig {
+                grid_dim: (num_blocks.max(1), 1, 1),
+                block_dim: (block_size, 1, 1),
+                shared_mem_bytes: 2 * block_size * 8,
+            };
+            let f = dev.get_func(MODULE, "ntt_inv_fused").unwrap();
+            unsafe {
+                f.launch(
+                    fused_cfg,
+                    (
+                        &mut *data,
+                        &self.inverse_twiddles,
+                        self.q,
+                        self.barrett_hi,
+                        num_fused,
+                    ),
+                )?;
+            }
+        }
+
+        // Global stages (t > block_size): individual kernel launches
+        let mut t = 1u32 << num_fused;
+        let mut m = (self.n >> 1) as u32 >> num_fused;
+        for _ in num_fused..self.log_n {
             let f = dev.get_func(MODULE, "ntt_inv_stage").unwrap();
             unsafe {
                 f.launch(

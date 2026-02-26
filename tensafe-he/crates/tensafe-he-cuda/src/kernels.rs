@@ -20,6 +20,8 @@ pub const KERNEL_NAMES: &[&str] = &[
     "poly_negate",
     "ntt_fwd_stage",
     "ntt_inv_stage",
+    "ntt_fwd_fused",
+    "ntt_inv_fused",
     "poly_scale",
     "fwd_twist",
     "inv_twist",
@@ -208,6 +210,118 @@ __global__ void ntt_inv_stage(
 
     data[idx0] = gpu_mod_add(u, v, q);
     data[idx1] = gpu_mod_mul(gpu_mod_sub(u, v, q), w, q, bh);
+}
+
+// =====================================================================
+// Fused NTT kernels — multiple stages in shared memory
+// =====================================================================
+
+// Forward NTT fused: processes stages [first_stage, log_n) in shared memory.
+// Block size = B threads, segment size = 2*B elements.
+// Each block loads a contiguous 2B-element segment, runs butterfly stages,
+// then writes back. Reduces kernel launches from log_n to ~5-6.
+__global__ void ntt_fwd_fused(
+    unsigned long long* __restrict__ data,
+    const unsigned long long* __restrict__ twiddles,
+    unsigned long long q, unsigned long long bh,
+    unsigned int log_n, unsigned int first_stage
+) {
+    extern __shared__ unsigned long long smem[];
+
+    unsigned int B = blockDim.x;
+    unsigned int segment_start = blockIdx.x * 2 * B;
+    unsigned int tid = threadIdx.x;
+
+    // Load segment into shared memory
+    smem[tid] = data[segment_start + tid];
+    smem[tid + B] = data[segment_start + tid + B];
+    __syncthreads();
+
+    unsigned int global_m = 1u << first_stage;
+
+    for (unsigned int s = first_stage; s < log_n; s++) {
+        unsigned int global_t = 1u << (log_n - s - 1);
+        unsigned int global_tid = blockIdx.x * B + tid;
+
+        unsigned int group_idx = global_tid / global_t;
+        unsigned int inner_idx = global_tid % global_t;
+        unsigned int global_idx0 = group_idx * 2 * global_t + inner_idx;
+        unsigned int local_idx0 = global_idx0 - segment_start;
+        unsigned int local_idx1 = local_idx0 + global_t;
+
+        unsigned long long w = twiddles[global_m + group_idx];
+        unsigned long long u = smem[local_idx0];
+        unsigned long long v_raw = smem[local_idx1];
+        __syncthreads();
+
+        unsigned long long v = gpu_mod_mul(v_raw, w, q, bh);
+        smem[local_idx0] = gpu_mod_add(u, v, q);
+        smem[local_idx1] = gpu_mod_sub(u, v, q);
+        __syncthreads();
+
+        global_m <<= 1;
+    }
+
+    // Write back to global memory
+    data[segment_start + tid] = smem[tid];
+    data[segment_start + tid + B] = smem[tid + B];
+}
+
+// Inverse NTT fused: processes stages [0, num_fused_stages) in shared memory.
+// Uses Gentleman-Sande butterfly.
+__global__ void ntt_inv_fused(
+    unsigned long long* __restrict__ data,
+    const unsigned long long* __restrict__ twiddles,
+    unsigned long long q, unsigned long long bh,
+    unsigned int num_fused_stages
+) {
+    extern __shared__ unsigned long long smem[];
+
+    unsigned int B = blockDim.x;
+    unsigned int segment_start = blockIdx.x * 2 * B;
+    unsigned int tid = threadIdx.x;
+
+    // Load segment into shared memory
+    smem[tid] = data[segment_start + tid];
+    smem[tid + B] = data[segment_start + tid + B];
+    __syncthreads();
+
+    unsigned int global_m_init = B;  // m starts at N/2, but locally it's B for first fused stage
+
+    for (unsigned int s = 0; s < num_fused_stages; s++) {
+        unsigned int global_t = 1u << s;
+        unsigned int global_m = (blockIdx.x * 2 * B) >> (s + 1);  // N >> (s+1) globally, but need group count
+        unsigned int global_tid = blockIdx.x * B + tid;
+
+        unsigned int group_idx = global_tid / global_t;
+        unsigned int inner_idx = global_tid % global_t;
+        unsigned int global_idx0 = group_idx * 2 * global_t + inner_idx;
+        unsigned int local_idx0 = global_idx0 - segment_start;
+        unsigned int local_idx1 = local_idx0 + global_t;
+
+        // Twiddle index: in inverse NTT, tw_offset = m = N >> (s+1)
+        // The actual m for stage s is half the total data size >> s
+        // For the full polynomial: m = N >> (s+1)
+        // We pass the total N through the segment calculation
+        unsigned int half_n = (blockIdx.x * 2 * B + 2 * B);  // This is a hack; need N
+        // Actually, we need N. Let's pass it or compute from gridDim.
+        // N = gridDim.x * 2 * B
+        unsigned int N = gridDim.x * 2 * B;
+        unsigned int inv_m = N >> (s + 1);
+
+        unsigned long long w = twiddles[inv_m + group_idx];
+        unsigned long long u = smem[local_idx0];
+        unsigned long long v = smem[local_idx1];
+        __syncthreads();
+
+        smem[local_idx0] = gpu_mod_add(u, v, q);
+        smem[local_idx1] = gpu_mod_mul(gpu_mod_sub(u, v, q), w, q, bh);
+        __syncthreads();
+    }
+
+    // Write back to global memory
+    data[segment_start + tid] = smem[tid];
+    data[segment_start + tid + B] = smem[tid + B];
 }
 
 // Scale every element by a constant: data[i] = data[i] * scalar mod q

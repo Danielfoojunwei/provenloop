@@ -41,6 +41,14 @@ pub struct GpuSecretKey {
     pub s_ntt: GpuRnsPoly,
 }
 
+/// GPU-resident public key.
+pub struct GpuPublicKey {
+    /// b = -a·s + e  (NTT domain, on GPU)
+    pub b: GpuRnsPoly,
+    /// a (NTT domain, on GPU)
+    pub a: GpuRnsPoly,
+}
+
 /// GPU-accelerated CKKS context.
 ///
 /// Owns the CUDA device handle, compiled kernel module, pre-computed GPU NTT tables,
@@ -133,6 +141,66 @@ impl GpuCkksContext {
         Ok(GpuSecretKey { s_ntt })
     }
 
+    /// Generate a public key from the secret key (GPU-accelerated NTT).
+    pub fn keygen_public<R: Rng>(&self, sk: &GpuSecretKey, rng: &mut R) -> GpuResult<GpuPublicKey> {
+        let n = self.params.poly_degree;
+        let num_limbs = self.params.num_limbs;
+
+        // Sample a and e on CPU
+        let mut a_cpu = RnsPoly::zero(n, num_limbs);
+        for l in 0..num_limbs {
+            let q = self.params.moduli[l].value;
+            a_cpu.limbs[l] = sample_uniform(rng, n, q);
+        }
+
+        let e_signed = sample_gaussian_signed(rng, n, ERROR_STD_DEV);
+        let mut e_cpu = RnsPoly::zero(n, num_limbs);
+        for l in 0..num_limbs {
+            let q = self.params.moduli[l].value;
+            for i in 0..n {
+                e_cpu.limbs[l][i] = if e_signed[i] >= 0 {
+                    (e_signed[i] as u64) % q
+                } else {
+                    q - ((-e_signed[i]) as u64 % q)
+                };
+            }
+        }
+
+        // Upload and NTT on GPU
+        let mut a_gpu = GpuRnsPoly::from_host(&self.dev, &a_cpu)?;
+        let mut e_gpu = GpuRnsPoly::from_host(&self.dev, &e_cpu)?;
+        for l in 0..num_limbs {
+            self.gpu_ntt_tables[l].negacyclic_ntt_forward(&mut a_gpu.limbs[l], &self.dev)?;
+            self.gpu_ntt_tables[l].negacyclic_ntt_forward(&mut e_gpu.limbs[l], &self.dev)?;
+        }
+
+        // b = -a·s + e (use encrypt_fused with m=0)
+        let zero_gpu = GpuRnsPoly::zero(&self.dev, n, num_limbs)?;
+        let mut b = GpuRnsPoly::zero(&self.dev, n, num_limbs)?;
+        let cfg = launch_cfg(n as u32);
+
+        for l in 0..num_limbs {
+            let f = self.dev.get_func(MODULE, "encrypt_fused").unwrap();
+            unsafe {
+                f.launch(
+                    cfg,
+                    (
+                        &mut b.limbs[l],
+                        &a_gpu.limbs[l],
+                        &sk.s_ntt.limbs[l],
+                        &zero_gpu.limbs[l], // m = 0
+                        &e_gpu.limbs[l],
+                        self.params.moduli[l].value,
+                        self.params.moduli[l].barrett_hi,
+                        n as u32,
+                    ),
+                )?;
+            }
+        }
+
+        Ok(GpuPublicKey { b, a: a_gpu })
+    }
+
     /// Encrypt a real-valued vector.
     ///
     /// RLWE encryption: ct = (c0, c1) where
@@ -212,6 +280,80 @@ impl GpuCkksContext {
         Ok(GpuCiphertext {
             c0,
             c1: a_gpu,
+            scale: SCALE,
+        })
+    }
+
+    /// Encrypt a real-valued vector using a public key (asymmetric RLWE, GPU-accelerated).
+    ///
+    /// ct = (c0, c1) where:
+    ///   u ← ternary, e0,e1 ← Gaussian
+    ///   c0 = b·u + e0 + m,  c1 = a·u + e1
+    pub fn encrypt_pk<R: Rng>(
+        &self,
+        z: &[f64],
+        pk: &GpuPublicKey,
+        rng: &mut R,
+    ) -> GpuResult<GpuCiphertext> {
+        let n = self.params.poly_degree;
+        let num_limbs = self.params.num_limbs;
+
+        // Encode plaintext on CPU
+        let m_cpu = self.encoder.encode(z, &self.params);
+
+        // Sample u (ternary) on CPU
+        let u_ternary = sample_ternary(rng, n, 3);
+        let mut u_cpu = RnsPoly::zero(n, num_limbs);
+        for l in 0..num_limbs {
+            let q = self.params.moduli[l].value;
+            for i in 0..n {
+                u_cpu.limbs[l][i] = match u_ternary[i] {
+                    0 => q - 1,
+                    1 => 0,
+                    2 => 1,
+                    _ => unreachable!(),
+                };
+            }
+        }
+
+        // Sample e0, e1 on CPU
+        let e0_signed = sample_gaussian_signed(rng, n, ERROR_STD_DEV);
+        let e1_signed = sample_gaussian_signed(rng, n, ERROR_STD_DEV);
+        let mut e0_cpu = RnsPoly::zero(n, num_limbs);
+        let mut e1_cpu = RnsPoly::zero(n, num_limbs);
+        for l in 0..num_limbs {
+            let q = self.params.moduli[l].value;
+            for i in 0..n {
+                e0_cpu.limbs[l][i] = if e0_signed[i] >= 0 { (e0_signed[i] as u64) % q } else { q - ((-e0_signed[i]) as u64 % q) };
+                e1_cpu.limbs[l][i] = if e1_signed[i] >= 0 { (e1_signed[i] as u64) % q } else { q - ((-e1_signed[i]) as u64 % q) };
+            }
+        }
+
+        // Upload to GPU and NTT
+        let mut m_gpu = GpuRnsPoly::from_host(&self.dev, &m_cpu)?;
+        let mut u_gpu = GpuRnsPoly::from_host(&self.dev, &u_cpu)?;
+        let mut e0_gpu = GpuRnsPoly::from_host(&self.dev, &e0_cpu)?;
+        let mut e1_gpu = GpuRnsPoly::from_host(&self.dev, &e1_cpu)?;
+
+        for l in 0..num_limbs {
+            self.gpu_ntt_tables[l].negacyclic_ntt_forward(&mut m_gpu.limbs[l], &self.dev)?;
+            self.gpu_ntt_tables[l].negacyclic_ntt_forward(&mut u_gpu.limbs[l], &self.dev)?;
+            self.gpu_ntt_tables[l].negacyclic_ntt_forward(&mut e0_gpu.limbs[l], &self.dev)?;
+            self.gpu_ntt_tables[l].negacyclic_ntt_forward(&mut e1_gpu.limbs[l], &self.dev)?;
+        }
+
+        // c0 = b·u + e0 + m (reuse encrypt_fused: it computes -a*s + m + e, here a=b, s=u negated)
+        // Better: use poly_hadamard + poly_add directly
+        let moduli = &self.params.moduli;
+        let bu = pk.b.hadamard_mul(&u_gpu, moduli, &self.dev)?;
+        let au = pk.a.hadamard_mul(&u_gpu, moduli, &self.dev)?;
+
+        let c0 = bu.add(&e0_gpu, moduli, &self.dev)?.add(&m_gpu, moduli, &self.dev)?;
+        let c1 = au.add(&e1_gpu, moduli, &self.dev)?;
+
+        Ok(GpuCiphertext {
+            c0,
+            c1,
             scale: SCALE,
         })
     }
@@ -306,6 +448,50 @@ impl GpuCkksContext {
         }
 
         Ok(poly_gpu)
+    }
+
+    /// Ciphertext + Ciphertext addition on GPU.
+    ///
+    /// ct' = (c0_a + c0_b, c1_a + c1_b). Both ciphertexts must have the same scale.
+    pub fn ct_add(
+        &self,
+        ct_a: &GpuCiphertext,
+        ct_b: &GpuCiphertext,
+    ) -> GpuResult<GpuCiphertext> {
+        assert!(
+            (ct_a.scale - ct_b.scale).abs() < 1.0,
+            "Scale mismatch in ct_add: {} vs {}",
+            ct_a.scale,
+            ct_b.scale
+        );
+        let moduli = &self.params.moduli;
+        Ok(GpuCiphertext {
+            c0: ct_a.c0.add(&ct_b.c0, moduli, &self.dev)?,
+            c1: ct_a.c1.add(&ct_b.c1, moduli, &self.dev)?,
+            scale: ct_a.scale,
+        })
+    }
+
+    /// Ciphertext - Ciphertext subtraction on GPU.
+    ///
+    /// ct' = (c0_a - c0_b, c1_a - c1_b). Both ciphertexts must have the same scale.
+    pub fn ct_sub(
+        &self,
+        ct_a: &GpuCiphertext,
+        ct_b: &GpuCiphertext,
+    ) -> GpuResult<GpuCiphertext> {
+        assert!(
+            (ct_a.scale - ct_b.scale).abs() < 1.0,
+            "Scale mismatch in ct_sub: {} vs {}",
+            ct_a.scale,
+            ct_b.scale
+        );
+        let moduli = &self.params.moduli;
+        Ok(GpuCiphertext {
+            c0: ct_a.c0.sub(&ct_b.c0, moduli, &self.dev)?,
+            c1: ct_a.c1.sub(&ct_b.c1, moduli, &self.dev)?,
+            scale: ct_a.scale,
+        })
     }
 
     /// Upload a CPU ciphertext to GPU.

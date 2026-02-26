@@ -13,6 +13,129 @@ use std::f64::consts::PI;
 use crate::params::{CkksParams, SCALE};
 use crate::rns::RnsPoly;
 
+/// Pre-computed tables for O(N log N) FFT-based canonical embedding.
+///
+/// The canonical embedding evaluates m(X) at ζ^{2k+1} for k=0..N-1,
+/// where ζ = e^{πi/N}. This is a "twisted DFT":
+///   m(ζ^{2k+1}) = FFT_N( m[j] · ζ^j )[k]
+///
+/// Pre-computing twist factors and twiddles eliminates all trig calls
+/// from the hot path. For N=16384: ~114K multiply-adds vs ~268M trig calls.
+#[derive(Debug, Clone)]
+struct FftTables {
+    n: usize,
+    /// Twist factors: twist_re[j] = cos(πj/N), twist_im[j] = sin(πj/N)
+    twist_re: Vec<f64>,
+    twist_im: Vec<f64>,
+    /// Bit-reversal permutation table for size N.
+    bit_rev: Vec<usize>,
+    /// FFT twiddle factors per stage: twiddle_re[s][k] = cos(-2πk/2^{s+1})
+    twiddle_re: Vec<Vec<f64>>,
+    /// FFT twiddle factors per stage: twiddle_im[s][k] = sin(-2πk/2^{s+1})
+    twiddle_im: Vec<Vec<f64>>,
+}
+
+impl FftTables {
+    fn new(n: usize) -> Self {
+        let log_n = n.trailing_zeros() as usize;
+
+        // Twist factors: ζ^j = e^{πij/N}
+        let mut twist_re = vec![0.0; n];
+        let mut twist_im = vec![0.0; n];
+        for j in 0..n {
+            let angle = PI * j as f64 / n as f64;
+            twist_re[j] = angle.cos();
+            twist_im[j] = angle.sin();
+        }
+
+        // Bit-reversal permutation
+        let mut bit_rev = vec![0usize; n];
+        for i in 0..n {
+            let mut rev = 0usize;
+            let mut val = i;
+            for _ in 0..log_n {
+                rev = (rev << 1) | (val & 1);
+                val >>= 1;
+            }
+            bit_rev[i] = rev;
+        }
+
+        // Twiddle factors for each FFT stage
+        let mut twiddle_re = Vec::with_capacity(log_n);
+        let mut twiddle_im = Vec::with_capacity(log_n);
+        for s in 0..log_n {
+            let half_len = 1 << s;
+            let mut tre = Vec::with_capacity(half_len);
+            let mut tim = Vec::with_capacity(half_len);
+            for k in 0..half_len {
+                let angle = -2.0 * PI * k as f64 / (2 * half_len) as f64;
+                tre.push(angle.cos());
+                tim.push(angle.sin());
+            }
+            twiddle_re.push(tre);
+            twiddle_im.push(tim);
+        }
+
+        Self { n, twist_re, twist_im, bit_rev, twiddle_re, twiddle_im }
+    }
+
+    /// In-place complex FFT (Cooley-Tukey radix-2 DIT).
+    fn fft(&self, re: &mut [f64], im: &mut [f64]) {
+        let n = self.n;
+        debug_assert_eq!(re.len(), n);
+        debug_assert_eq!(im.len(), n);
+
+        // Bit-reversal permutation
+        for i in 0..n {
+            let j = self.bit_rev[i];
+            if i < j {
+                re.swap(i, j);
+                im.swap(i, j);
+            }
+        }
+
+        // Butterfly stages
+        for s in 0..self.twiddle_re.len() {
+            let half_len = 1 << s;
+            let full_len = half_len << 1;
+            for group_start in (0..n).step_by(full_len) {
+                for k in 0..half_len {
+                    let w_re = self.twiddle_re[s][k];
+                    let w_im = self.twiddle_im[s][k];
+                    let i0 = group_start + k;
+                    let i1 = i0 + half_len;
+
+                    let v_re = w_re * re[i1] - w_im * im[i1];
+                    let v_im = w_re * im[i1] + w_im * re[i1];
+
+                    let u_re = re[i0];
+                    let u_im = im[i0];
+                    re[i0] = u_re + v_re;
+                    im[i0] = u_im + v_im;
+                    re[i1] = u_re - v_re;
+                    im[i1] = u_im - v_im;
+                }
+            }
+        }
+    }
+
+    /// In-place complex inverse FFT (conjugate-FFT-conjugate-scale).
+    #[allow(dead_code)]
+    fn ifft(&self, re: &mut [f64], im: &mut [f64]) {
+        let n = self.n;
+        // Conjugate
+        for v in im.iter_mut() { *v = -*v; }
+        // Forward FFT
+        self.fft(re, im);
+        // Conjugate + scale by 1/N
+        let inv_n = 1.0 / n as f64;
+        for i in 0..n {
+            re[i] *= inv_n;
+            im[i] = -im[i] * inv_n;
+        }
+    }
+}
+
 /// CKKS encoder/decoder for a given parameter set.
 #[derive(Debug, Clone)]
 pub struct CkksEncoder {
@@ -20,6 +143,8 @@ pub struct CkksEncoder {
     n: usize,
     /// Number of SIMD slots = N/2.
     num_slots: usize,
+    /// Pre-computed FFT tables for O(N log N) encode/decode.
+    fft: FftTables,
 }
 
 impl CkksEncoder {
@@ -27,10 +152,12 @@ impl CkksEncoder {
     pub fn new(params: &CkksParams) -> Self {
         let n = params.poly_degree;
         let num_slots = params.num_slots;
+        let fft = FftTables::new(n);
 
         Self {
             n,
             num_slots,
+            fft,
         }
     }
 
@@ -112,45 +239,39 @@ impl CkksEncoder {
     }
 
     /// Inverse canonical embedding: σ^{-1}(z) → polynomial coefficients.
-    /// This is essentially an inverse DFT at the primitive roots of X^N+1.
     ///
-    /// For z ∈ C^{N/2} with conjugate symmetry (z_{N/2+i} = conj(z_i)):
-    ///   m[j] = (1/N) · Σ_{k=0}^{N-1} z̃[k] · ζ^{-(2k+1)j}
+    /// Uses O(N log N) FFT instead of O(N²) DFT.
     ///
-    /// For real-valued z, the result m has real coefficients.
+    /// z[k] = Σ_j m[j]·ζ^{(2k+1)j} = Σ_j a[j]·ω^{-kj}  (where a[j] = m[j]·ζ^j, ω = e^{-2πi/N})
+    ///
+    /// Inverting: a[j] = (1/N)·FFT(z̃)[j], then m[j] = Re(a[j]·ζ^{-j})
+    ///
+    /// For real-valued z: z̃[k] = z[k], z̃[N-1-k] = z[k] (conjugate symmetry).
     fn inverse_canonical_embedding(&self, z: &[f64]) -> Vec<f64> {
         let n = self.n;
         let s = self.num_slots;
         assert_eq!(z.len(), s);
 
-        // Build the full complex vector with conjugate symmetry:
-        // The canonical embedding evaluates at ζ^{2k+1} for k=0..N-1.
-        // Conjugate pair: slot k ↔ slot N-1-k (since conj(ζ^{2k+1}) = ζ^{2(N-1-k)+1}).
-        // For real z: z̃[k] = z[k], z̃[N-1-k] = z[k].
-        let mut z_real = vec![0.0f64; n];
-        let z_imag = vec![0.0f64; n];
+        // Build conjugate-symmetric complex vector
+        let mut z_re = vec![0.0f64; n];
+        let mut z_im = vec![0.0f64; n];
         for k in 0..s {
-            z_real[k] = z[k];
-            z_real[n - 1 - k] = z[k];
+            z_re[k] = z[k];
+            z_re[n - 1 - k] = z[k];
         }
 
-        // Inverse DFT: m[j] = (1/N) · Σ_{k=0}^{N-1} z̃[k] · ζ^{-(2k+1)j}
-        let mut coeffs = vec![0.0f64; n];
-        let inv_n = 1.0 / n as f64;
+        // FFT: a[j] = (1/N)·Σ_k z̃[k]·e^{-2πikj/N}
+        self.fft.fft(&mut z_re, &mut z_im);
 
+        // Scale by 1/N and un-twist: m[j] = Re(a[j]/N · ζ^{-j})
+        // ζ^{-j} = cos(πj/N) - i·sin(πj/N)
+        // Re((a_re + i·a_im)(cos - i·sin)) = a_re·cos + a_im·sin
+        let inv_n = 1.0 / n as f64;
+        let mut coeffs = vec![0.0f64; n];
         for j in 0..n {
-            let mut sum_real = 0.0f64;
-            for k in 0..n {
-                // ζ^{-(2k+1)j} = cos(-angle) + i·sin(-angle)
-                // angle = π(2k+1)j / N
-                let angle = PI * (2 * k + 1) as f64 * j as f64 / n as f64;
-                let cos_val = angle.cos();
-                let sin_val = angle.sin();
-                // z̃[k] · conj(ζ^{(2k+1)j}) = (z_r + i·z_i)(cos - i·sin)
-                // Real part: z_r·cos + z_i·sin
-                sum_real += z_real[k] * cos_val + z_imag[k] * sin_val;
-            }
-            coeffs[j] = sum_real * inv_n;
+            let a_re = z_re[j] * inv_n;
+            let a_im = z_im[j] * inv_n;
+            coeffs[j] = a_re * self.fft.twist_re[j] + a_im * self.fft.twist_im[j];
         }
 
         coeffs
@@ -163,7 +284,12 @@ impl CkksEncoder {
     }
 
     /// Canonical embedding: polynomial coefficients → slot values.
-    /// σ(m)[k] = m(ζ^{2k+1}) = Σ_{j=0}^{N-1} m[j] · ζ^{(2k+1)j}
+    ///
+    /// Uses O(N log N) FFT instead of O(N²) DFT.
+    ///
+    /// z[k] = Re(m(ζ^{2k+1})) = Re(Σ_j a[j]·ω^{-kj})  where a[j] = m[j]·ζ^j
+    ///
+    /// Computed as: z[k] = Re(conj(FFT(conj(a)))[k]) = Re(FFT(conj(a))[k])
     ///
     /// Returns the real parts of the first N/2 evaluations.
     fn canonical_embedding(&self, coeffs: &[f64]) -> Vec<f64> {
@@ -171,19 +297,21 @@ impl CkksEncoder {
         let s = self.num_slots;
         assert_eq!(coeffs.len(), n);
 
-        let mut z = vec![0.0f64; s];
-
-        for k in 0..s {
-            let mut val_real = 0.0f64;
-            for j in 0..n {
-                // ζ^{(2k+1)j}: angle = π(2k+1)j / N
-                let angle = PI * (2 * k + 1) as f64 * j as f64 / n as f64;
-                val_real += coeffs[j] * angle.cos();
-            }
-            z[k] = val_real;
+        // Conjugate-twist: b[j] = conj(a[j]) = m[j]·conj(ζ^j)
+        //   b_re[j] = m[j]·cos(πj/N),  b_im[j] = -m[j]·sin(πj/N)
+        let mut b_re = vec![0.0f64; n];
+        let mut b_im = vec![0.0f64; n];
+        for j in 0..n {
+            b_re[j] = coeffs[j] * self.fft.twist_re[j];
+            b_im[j] = -coeffs[j] * self.fft.twist_im[j];
         }
 
-        z
+        // FFT(conj(a)): z[k] = Re(conj(FFT(conj(a))[k])) = Re(FFT(conj(a))[k])
+        self.fft.fft(&mut b_re, &mut b_im);
+
+        // Extract real parts of first N/2 values
+        b_re.truncate(s);
+        b_re
     }
 }
 

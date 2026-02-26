@@ -529,20 +529,52 @@ class FinanceInferenceEngine:
                     "(install cukks-cu128 for CUDA 12.8)"
                 )
 
-            # Allow poly_n override: TENSAFE_POLY_N=16384 for faster NTT
+            # Allow runtime parameter overrides via environment variables:
+            #   TENSAFE_POLY_N=16384        → polynomial degree
+            #   TENSAFE_MODULUS_BITS=[60,40,40,60] → RNS modulus chain (JSON)
+            #   TENSAFE_SCALE_BITS=40       → encoding scale bits
             # Default: for_depth(3) → poly_n=32768 (256-bit security)
-            # Override: poly_n=16384 → ~192-bit security (still > 128-bit min)
             poly_n_override = int(os.environ.get("TENSAFE_POLY_N", "0"))
+            modulus_bits_str = os.environ.get("TENSAFE_MODULUS_BITS", "")
+            scale_bits_override = int(
+                os.environ.get("TENSAFE_SCALE_BITS", "0")
+            )
+
             if poly_n_override in (8192, 16384, 32768, 65536):
+                import json as _json
+
                 from cukks.context import InferenceConfig
+
+                # Parse modulus chain if provided
+                if modulus_bits_str.strip():
+                    modulus_bits = _json.loads(modulus_bits_str)
+                    logger.info(
+                        f"CuKKS: custom modulus chain {modulus_bits} "
+                        f"(from TENSAFE_MODULUS_BITS env var)"
+                    )
+                else:
+                    modulus_bits = None
+
+                scale_bits = (
+                    scale_bits_override
+                    if scale_bits_override > 0
+                    else hec.get("scale_bits", 40)
+                )
+
                 logger.info(
-                    f"CuKKS: using explicit poly_n={poly_n_override} "
-                    f"(from TENSAFE_POLY_N env var)"
+                    f"CuKKS: using poly_n={poly_n_override}, "
+                    f"scale_bits={scale_bits} "
+                    f"(from TENSAFE_* env vars)"
                 )
-                inf_cfg = InferenceConfig(
-                    poly_mod_degree=poly_n_override,
-                    scale_bits=hec.get("scale_bits", 40),
-                )
+
+                inf_cfg_kwargs = {
+                    "poly_mod_degree": poly_n_override,
+                    "scale_bits": scale_bits,
+                }
+                if modulus_bits is not None:
+                    inf_cfg_kwargs["modulus_bits"] = modulus_bits
+
+                inf_cfg = InferenceConfig(**inf_cfg_kwargs)
                 ctx = _cukks_pkg.CKKSInferenceContext(inf_cfg)
             else:
                 # Default: auto-select for depth=3 → poly_n=32768
@@ -708,6 +740,88 @@ class FinanceInferenceEngine:
 
             if not loaded:
                 logger.warning(f"Adapter {name}: no loadable source found")
+
+    def swap_adapter(self, expert_name: str, tgsp_data: bytes,
+                     config_overrides: dict | None = None):
+        """Hot-swap a single adapter without restarting inference.
+
+        Loads a new TGSP package, extracts LoRA weights, pre-computes
+        the NTT(plaintext) cache, and atomically swaps the cached
+        weights. The next token generation uses the new adapter with
+        zero downtime.
+
+        Args:
+            expert_name: Name of the expert slot to replace.
+            tgsp_data: Raw bytes of the new TGSP package.
+            config_overrides: Optional dict to merge into adapter config.
+        """
+        import io as _io
+        import struct as _struct
+
+        # 1. Parse TGSP package
+        if len(tgsp_data) < 10 or tgsp_data[:4] != b"TGSP":
+            raise ValueError("Invalid TGSP package: bad magic bytes")
+
+        manifest_len = _struct.unpack_from("<I", tgsp_data, 6)[0]
+        manifest_bytes = tgsp_data[10: 10 + manifest_len]
+        manifest = json.loads(manifest_bytes.decode("utf-8"))
+        payload = tgsp_data[10 + manifest_len:]
+
+        # 2. Verify payload integrity
+        import hashlib
+        actual_hash = hashlib.sha256(payload).hexdigest()
+        if manifest.get("payload_hash") and actual_hash != manifest["payload_hash"]:
+            raise ValueError(
+                f"TGSP payload hash mismatch: expected {manifest['payload_hash']}, "
+                f"got {actual_hash}"
+            )
+
+        # 3. Extract LoRA weights
+        buf = _io.BytesIO(payload)
+        lora_state = torch.load(buf, map_location="cpu", weights_only=False)
+        weights = {}
+        for key in lora_state:
+            if "lora_A" in key:
+                weights["lora_A"] = lora_state[key].to(
+                    dtype=torch.float32, device=self.device
+                )
+            elif "lora_B" in key:
+                weights["lora_B"] = lora_state[key].to(
+                    dtype=torch.float32, device=self.device
+                )
+        if "lora_A" not in weights or "lora_B" not in weights:
+            raise ValueError("TGSP package missing lora_A or lora_B weights")
+
+        # 4. Pre-compute NTT(plaintext) cache if HE is active
+        if self.he_ctx is not None:
+            self._precompute_he_cache(expert_name, weights)
+
+        # 5. Build adapter config from manifest + overrides
+        ecfg = {
+            "adapter_id": manifest.get("adapter_id", ""),
+            "rank": manifest.get("rank", 32),
+            "alpha": manifest.get("alpha", 64),
+            "format_version": manifest.get("format_version", "1.0"),
+            "license": manifest.get("license", "unknown"),
+        }
+        gate_kw = manifest.get("metadata", {}).get("tags", [])
+        if config_overrides:
+            ecfg.update(config_overrides)
+            gate_kw = config_overrides.get("gate_keywords", gate_kw)
+
+        # 6. Atomically swap into the adapters dict
+        self.adapters[expert_name] = {
+            "weights": weights,
+            "config": ecfg,
+            "gate_keywords": set(gate_kw),
+            "always_active": ecfg.get("always_active", False),
+        }
+
+        logger.info(
+            f"Hot-swapped adapter '{expert_name}' "
+            f"(id={manifest.get('adapter_id', '?')}, "
+            f"version={manifest.get('format_version', '?')})"
+        )
 
     def _load_lora_from_checkpoint(self, ckpt_path: str, name: str) -> dict:
         """Extract LoRA A/B weights from an orchestrator checkpoint.
@@ -1054,6 +1168,15 @@ class FinanceInferenceEngine:
                       track_budget: bool = True):
         """Add calibrated Gaussian DP noise to hidden state.
 
+        ARCHITECTURE NOTE (Phase 5 fix):
+        In the client-side key architecture (Phase 2), this method should be
+        called AFTER decryption on the client side, not before encryption on
+        the server. When TENSAFE_CLIENT_SIDE_DP=1, this is a no-op and the
+        client is responsible for calling _client_add_dp_noise after decrypt.
+
+        In the legacy server-side mode (default for backward compat), DP noise
+        is still added here before encryption.
+
         Uses the Gaussian mechanism: σ = Δf · √(2·ln(1.25/δ)) / ε
         Clips hidden state to unit L2 norm before adding noise.
 
@@ -1066,6 +1189,9 @@ class FinanceInferenceEngine:
 
         Returns (noised_hidden, sigma, epsilon_spent, budget_ok)
         """
+        # Phase 5: In client-side DP mode, skip server-side noise
+        if os.environ.get("TENSAFE_CLIENT_SIDE_DP", "").strip() in ("1", "true"):
+            return hidden, 0.0, 0.0, True
         # Clip to unit L2 norm (ensures sensitivity = 1.0)
         norm = np.linalg.norm(hidden)
         if norm > self._dp_sensitivity:
@@ -1093,6 +1219,40 @@ class FinanceInferenceEngine:
             )
 
         return noised, self._dp_sigma, epsilon_spent, budget_ok
+
+    @staticmethod
+    def client_add_dp_noise(
+        decrypted: np.ndarray,
+        dp_sigma: float,
+        dp_sensitivity: float = 1.0,
+    ) -> np.ndarray:
+        """Client-side DP noise injection (Phase 5 architecture).
+
+        Called by the client AFTER decrypting the HE result. The server never
+        sees the plaintext result, preserving the HE privacy guarantee.
+
+        In the new client-side key architecture:
+            Client: h → encrypt_pk(h, pk) → server
+            Server: ct_result = ct × pt (blind compute)
+            Client: result = decrypt(ct_result, sk)
+            Client: noised = client_add_dp_noise(result, sigma)  ← HERE
+
+        Args:
+            decrypted: Decrypted result vector.
+            dp_sigma: Gaussian noise standard deviation.
+            dp_sensitivity: L2 sensitivity bound for clipping.
+
+        Returns:
+            Noised result vector.
+        """
+        norm = np.linalg.norm(decrypted)
+        if norm > dp_sensitivity:
+            decrypted = decrypted * (dp_sensitivity / norm)
+        noise = np.random.normal(0, dp_sigma, size=decrypted.shape).astype(
+            decrypted.dtype
+        )
+        return decrypted + noise
+
 
     # ------------------------------------------------------------------
     # Split inference: server-side forward pass

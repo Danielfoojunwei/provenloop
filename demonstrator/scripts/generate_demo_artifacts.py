@@ -118,11 +118,12 @@ def _make_tgsp(lora_state: dict, expert_name: str) -> bytes:
     torch.save(lora_state, payload_buf)
     payload = payload_buf.getvalue()
 
-    # Build manifest
+    # Build manifest (TGSP v2 — marketplace-ready)
     payload_hash = hashlib.sha256(payload).hexdigest()
+    adapter_id = hashlib.sha256(expert_name.encode()).hexdigest()[:16]
     manifest = {
-        "format_version": "1.0",
-        "adapter_id": hashlib.sha256(expert_name.encode()).hexdigest()[:16],
+        "format_version": "2.0",
+        "adapter_id": adapter_id,
         "model_name": f"tensafe-finance-{expert_name}",
         "model_version": "1.0.0",
         "rank": RANK,
@@ -130,10 +131,18 @@ def _make_tgsp(lora_state: dict, expert_name: str) -> bytes:
         "target_modules": TARGET_MODULES[expert_name],
         "payload_size": len(payload),
         "payload_hash": payload_hash,
+        # v2 marketplace fields
+        "license": "commercial",
+        "price_per_1k_tokens": 0.001,
+        "creator": "tensafe-demo",
+        "encrypted_payload": False,
+        "usage_metering": True,
         "metadata": {
             "domain": "finance",
             "expert_type": expert_name,
             "training": "sft+reinforce",
+            "description": f"LoRA adapter for {expert_name.replace('_', ' ')}",
+            "tags": ["finance", expert_name.split("_")[0]],
         },
     }
     manifest_bytes = json.dumps(manifest, indent=2).encode("utf-8")

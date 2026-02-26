@@ -35,22 +35,53 @@ pub fn mod_mul(a: u64, b: u64, q: u64) -> u64 {
     ((a as u128 * b as u128) % q as u128) as u64
 }
 
-/// Barrett reduction: reduce a value < q^2 to [0, q).
-/// Uses pre-computed Barrett constant from Modulus.
-/// For a < q^2: result = a mod q.
+/// Barrett reduction: reduce a 128-bit value to [0, q).
+/// Uses pre-computed Barrett constant (128-bit, stored as hi:lo pair).
+///
+/// For inputs a < q^2 where q < 2^63: result = a mod q.
+///
+/// Algorithm: approx_quot = floor(a * floor(2^128/q) / 2^128)
+///            r = a - approx_quot * q, then at most 2 corrections.
 #[inline(always)]
 pub fn barrett_reduce(a: u128, m: &Modulus) -> u64 {
-    let q = m.value as u128;
-    // Approximate quotient: (a * barrett) >> 128
-    // barrett ≈ 2^128 / q, stored as barrett_hi = floor(2^128 / q) >> 64
-    let approx_quot = ((a >> 64) * m.barrett_hi as u128) >> 64;
-    let mut r = (a - approx_quot * q) as u64;
-    // At most 2 corrections needed
-    if r >= m.value {
-        r -= m.value;
+    let q = m.value;
+    let a_lo = a as u64;
+    let a_hi = (a >> 64) as u64;
+
+    // For small products that fit in 64 bits, use direct reduction.
+    if a_hi == 0 {
+        return a_lo % q;
     }
-    if r >= m.value {
-        r -= m.value;
+
+    // Compute top 64 bits of the 256-bit product: a (128-bit) × barrett (128-bit).
+    // We need: floor(a * barrett / 2^128).
+    //
+    // a * barrett = (a_hi * 2^64 + a_lo) * (bh * 2^64 + bl)
+    //             = a_hi*bh * 2^128 + (a_hi*bl + a_lo*bh) * 2^64 + a_lo*bl
+    //
+    // We want floor(this / 2^128) = a_hi*bh + floor((a_hi*bl + a_lo*bh) / 2^64)
+    //                                         + carry from a_lo*bl (negligible, skip for speed)
+    let p_hh = a_hi as u128 * m.barrett_hi as u128;
+    let p_hl = a_hi as u128 * m.barrett_lo as u128;
+    let p_lh = a_lo as u128 * m.barrett_hi as u128;
+
+    // Middle sum, taking only the high 64 bits
+    let mid_sum = (p_hl >> 64) + (p_lh >> 64);
+    // Carry from the low 64 bits of p_hl + p_lh
+    let mid_lo_sum = (p_hl as u64 as u128) + (p_lh as u64 as u128);
+    let mid_carry = mid_lo_sum >> 64;
+
+    let approx_quot = (p_hh + mid_sum + mid_carry) as u64;
+
+    // r = a_lo - approx_quot * q (wrapping, since approx_quot ≤ true quotient)
+    let mut r = a_lo.wrapping_sub(approx_quot.wrapping_mul(q));
+
+    // At most 2 corrections
+    if r >= q {
+        r -= q;
+    }
+    if r >= q {
+        r -= q;
     }
     r
 }
@@ -213,9 +244,9 @@ impl RnsPoly {
         assert_eq!(self.n, other.n);
         let mut result = Self::zero(self.n, self.limbs.len());
         for l in 0..self.limbs.len() {
-            let q = moduli[l].value;
+            let m = &moduli[l];
             for i in 0..self.n {
-                result.limbs[l][i] = mod_mul(self.limbs[l][i], other.limbs[l][i], q);
+                result.limbs[l][i] = mod_mul_barrett(self.limbs[l][i], other.limbs[l][i], m);
             }
         }
         result

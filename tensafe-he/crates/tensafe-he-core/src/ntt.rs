@@ -7,7 +7,8 @@
 //!
 //! Complexity: T_NTT(N) = (N/2) · log₂(N) butterfly operations per limb.
 
-use crate::rns::{mod_add, mod_mul, mod_sub};
+use crate::params::Modulus;
+use crate::rns::{mod_add, mod_mul_barrett, mod_sub};
 
 /// Pre-computed NTT tables for a specific (N, q) pair.
 #[derive(Debug, Clone)]
@@ -24,6 +25,8 @@ pub struct NttTables {
     pub n_inv: u64,
     /// The modulus q.
     pub q: u64,
+    /// The full Modulus struct with Barrett constant for fast modular multiply.
+    pub modulus: Modulus,
     /// log₂(N).
     pub log_n: u32,
     /// Polynomial degree N.
@@ -44,6 +47,10 @@ impl NttTables {
         let inverse_twiddles = compute_inv_twiddle_factors(n, psi, q);
         let n_inv = mod_inv(n as u64, q);
 
+        // Build Modulus struct for Barrett reduction
+        let bits = 64 - q.leading_zeros();
+        let modulus = Modulus::new(q, bits);
+
         Self {
             forward_twiddles,
             inverse_twiddles,
@@ -51,6 +58,7 @@ impl NttTables {
             psi_inv,
             n_inv,
             q,
+            modulus,
             log_n,
             n,
         }
@@ -71,6 +79,7 @@ impl NttTables {
 pub fn negacyclic_ntt_forward(a: &mut [u64], tables: &NttTables) {
     let n = tables.n;
     let q = tables.q;
+    let modulus = &tables.modulus;
     debug_assert_eq!(a.len(), n);
 
     let mut t = n >> 1;
@@ -82,7 +91,7 @@ pub fn negacyclic_ntt_forward(a: &mut [u64], tables: &NttTables) {
             let j1 = 2 * i * t;
             for j in j1..j1 + t {
                 let u = a[j];
-                let v = mod_mul(a[j + t], w, q);
+                let v = mod_mul_barrett(a[j + t], w, modulus);
                 a[j] = mod_add(u, v, q);
                 a[j + t] = mod_sub(u, v, q);
             }
@@ -104,6 +113,7 @@ pub fn negacyclic_ntt_forward(a: &mut [u64], tables: &NttTables) {
 pub fn negacyclic_ntt_inverse(a: &mut [u64], tables: &NttTables) {
     let n = tables.n;
     let q = tables.q;
+    let modulus = &tables.modulus;
     debug_assert_eq!(a.len(), n);
 
     let mut t = 1;
@@ -117,7 +127,7 @@ pub fn negacyclic_ntt_inverse(a: &mut [u64], tables: &NttTables) {
                 let u = a[j];
                 let v = a[j + t];
                 a[j] = mod_add(u, v, q);
-                a[j + t] = mod_mul(mod_sub(u, v, q), w, q);
+                a[j + t] = mod_mul_barrett(mod_sub(u, v, q), w, modulus);
             }
         }
         t <<= 1;
@@ -126,7 +136,7 @@ pub fn negacyclic_ntt_inverse(a: &mut [u64], tables: &NttTables) {
 
     // Normalize by N^{-1} mod q
     for coeff in a.iter_mut() {
-        *coeff = mod_mul(*coeff, tables.n_inv, q);
+        *coeff = mod_mul_barrett(*coeff, tables.n_inv, modulus);
     }
 }
 
@@ -193,9 +203,10 @@ mod tests {
         negacyclic_ntt_forward(&mut b_ntt, &tables);
 
         // Hadamard product in NTT domain
+        let modulus = Modulus::new(q, 64 - q.leading_zeros());
         let mut c_ntt = vec![0u64; n];
         for i in 0..n {
-            c_ntt[i] = mod_mul(a_ntt[i], b_ntt[i], q);
+            c_ntt[i] = mod_mul_barrett(a_ntt[i], b_ntt[i], &modulus);
         }
 
         // Inverse NTT

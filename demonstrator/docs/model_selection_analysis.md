@@ -228,4 +228,6 @@ Qwen3.5-35B-A3B is the optimal model for TenSafe-HE because:
 
 Net effect: **Faster than Qwen2.5-1.5B on H100 (model forward 15ms → 2.9ms),
 ~35% more accurate, zero HE pipeline changes. Peak: 107.5 tok/s with all
-software optimizations (see `throughput_analysis.md` for full breakdown).**
+software optimizations. With UMA + 3D stacked architectures (Rubin R100):
+515 tok/s. With CIM-NTT: 2,703+ tok/s. See `throughput_analysis.md` Sections
+8-11 for full breakdown including architecture deep dive.**

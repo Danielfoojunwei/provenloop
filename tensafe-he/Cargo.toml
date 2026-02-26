@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/tensafe-he-core",
     "crates/tensafe-he-cpu",
+    "crates/tensafe-he-cuda",
 ]
 
 [workspace.package]

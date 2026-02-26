@@ -1,0 +1,13 @@
+[package]
+name = "tensafe-he-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "TenSafe-HE core: CKKS parameters, RNS arithmetic, encoding, NTT, ciphertext operations"
+
+[dependencies]
+rand = "0.9"
+rand_distr = "0.5"
+
+[dev-dependencies]
+approx = "0.5"

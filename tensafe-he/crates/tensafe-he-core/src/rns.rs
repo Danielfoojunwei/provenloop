@@ -103,9 +103,15 @@ pub fn find_primitive_root(n: usize, q: u64) -> u64 {
     // ψ = g^((q-1)/(2N)) is a primitive 2N-th root of unity.
     let exponent = (q - 1) / two_n;
 
-    // Try small generators until we find one that works
-    for g in 2..q {
+    // Try small generators. For NTT-friendly primes, a primitive 2N-th root
+    // is typically found within the first few hundred candidates.
+    // Skip g where g^exponent ≡ 1 (trivial root — not primitive).
+    for g in 2..10000u64 {
+        if g >= q { break; }
         let psi = mod_pow(g, exponent, q);
+
+        // Skip trivial root (psi = 1 means g has order dividing exponent)
+        if psi <= 1 { continue; }
 
         // Verify: ψ^N ≡ -1 (mod q) (ensures it's a *primitive* 2N-th root)
         let psi_n = mod_pow(psi, n as u64, q);
@@ -113,7 +119,7 @@ pub fn find_primitive_root(n: usize, q: u64) -> u64 {
             return psi;
         }
     }
-    panic!("No primitive 2N-th root of unity found for q={q}, N={n}");
+    panic!("No primitive 2N-th root of unity found for q={q}, N={n} (searched 10000 candidates)");
 }
 
 /// Compute NTT twiddle factors (powers of ψ in bit-reversed order).

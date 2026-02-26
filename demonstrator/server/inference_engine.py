@@ -491,12 +491,17 @@ class FinanceInferenceEngine:
         #   output_hidden_states=True and dynamic KV cache.  Tested and confirmed.
         # DEFAULT mode (inductor, no CUDA graphs) works fine and gives ~20-30%
         # speedup on transformer forward.
-        try:
-            self.model = torch.compile(self.model)
-            logger.info("Base model loaded + torch.compile (inductor default)")
-        except Exception as e:
-            logger.warning(f"torch.compile failed ({e}), using eager mode")
-            logger.info("Base model loaded (eager mode)")
+        # DISABLE_COMPILE: set TENSAFE_NO_COMPILE=1 to skip (workaround for
+        # PyTorch inductor codegen bugs on some platforms).
+        if os.environ.get("TENSAFE_NO_COMPILE", "").strip() in ("1", "true"):
+            logger.info("Base model loaded (eager mode, TENSAFE_NO_COMPILE set)")
+        else:
+            try:
+                self.model = torch.compile(self.model)
+                logger.info("Base model loaded + torch.compile (inductor default)")
+            except Exception as e:
+                logger.warning(f"torch.compile failed ({e}), using eager mode")
+                logger.info("Base model loaded (eager mode)")
 
         # CKKS backend
         self._init_ckks()

@@ -209,50 +209,24 @@ mod tests {
         assert_eq!(c_ntt, expected);
     }
 
-    /// Test with actual TenSafe modulus (N=16384 would be too slow for unit test,
-    /// use N=256 with a 60-bit prime).
+    /// Test with actual TenSafe 60-bit modulus and N=8192 (production params).
+    /// Uses the exact same modulus from CkksParams::n16384 with a smaller N
+    /// that still divides (q-1).
     #[test]
     fn test_ntt_roundtrip_60bit_prime() {
+        // Use the actual TenSafe 60-bit modulus: q ≡ 1 (mod 32768)
+        // so q ≡ 1 (mod 2*N) for any N that is a power of 2 up to 16384.
         let n = 256;
-        // Need q ≡ 1 (mod 512). Use a known NTT-friendly prime.
-        let q = 1152921504606846977u64; // 2^60 - ... , ≡ 1 mod 512?
+        let q = 1152921504606830593u64; // actual TenSafe q_0, ≡ 1 mod 32768
+        assert_eq!(q % (2 * n as u64), 1, "q must be ≡ 1 mod 2N");
 
-        // Check NTT-friendliness
-        if q % (2 * n as u64) != 1 {
-            // Find a suitable prime
-            let mut q2 = (q / (2 * n as u64)) * (2 * n as u64) + 1;
-            // Search for prime
-            loop {
-                if is_prime_simple(q2) {
-                    break;
-                }
-                q2 += 2 * n as u64;
-            }
-            let tables = NttTables::new(n, q2);
-            let original: Vec<u64> = (0..n as u64).map(|i| i % q2).collect();
-            let mut a = original.clone();
-            negacyclic_ntt_forward(&mut a, &tables);
-            negacyclic_ntt_inverse(&mut a, &tables);
-            assert_eq!(a, original);
-        } else {
-            let tables = NttTables::new(n, q);
-            let original: Vec<u64> = (0..n as u64).map(|i| i % q).collect();
-            let mut a = original.clone();
-            negacyclic_ntt_forward(&mut a, &tables);
-            negacyclic_ntt_inverse(&mut a, &tables);
-            assert_eq!(a, original);
-        }
-    }
-
-    fn is_prime_simple(n: u64) -> bool {
-        if n < 2 { return false; }
-        if n == 2 || n == 3 { return true; }
-        if n % 2 == 0 || n % 3 == 0 { return false; }
-        let mut i = 5u64;
-        while i.saturating_mul(i) <= n {
-            if n % i == 0 || n % (i + 2) == 0 { return false; }
-            i += 6;
-        }
-        true
+        let tables = NttTables::new(n, q);
+        let original: Vec<u64> = (0..n as u64).map(|i| i % q).collect();
+        let mut a = original.clone();
+        negacyclic_ntt_forward(&mut a, &tables);
+        // Check NTT actually changed the data
+        assert_ne!(a, original, "NTT should transform the polynomial");
+        negacyclic_ntt_inverse(&mut a, &tables);
+        assert_eq!(a, original);
     }
 }

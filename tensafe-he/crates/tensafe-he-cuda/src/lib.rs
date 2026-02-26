@@ -62,8 +62,11 @@ pub mod context;
 
 // Re-export main types for convenience.
 pub use context::{GpuCkksContext, GpuCiphertext, GpuSecretKey, GpuPublicKey};
-pub use ntt::GpuNttTables;
-pub use poly::GpuRnsPoly;
+pub use ntt::{
+    GpuNttTables, StreamPool, HePipelineGraph,
+    NttBackend, GpuNttBackend, PimDataLayout,
+};
+pub use poly::{GpuRnsPoly, CompletionEvent};
 
 use cudarc::driver::{DriverError, LaunchConfig};
 

@@ -1416,7 +1416,16 @@ class FinanceInferenceEngine:
                 gate_val = 1.0  # step-gate fires for routed expert
 
                 # Apply delta to hidden state (both are 1536-dim — correct!)
-                if delta is not None and delta.size > 0:
+                # Only re-project through lm_head when delta is large enough
+                # to affect token selection.  When delta is negligible (e.g.
+                # near-zero LoRA-B weights), reuse out.logits to avoid
+                # floating-point non-determinism from a redundant lm_head call.
+                delta_significant = (
+                    delta is not None
+                    and delta.size > 0
+                    and np.abs(delta).max() > 1e-6
+                )
+                if delta_significant:
                     d_len = min(len(delta), last_hidden.shape[2])
                     delta_t = torch.tensor(
                         delta[:d_len],
@@ -1424,9 +1433,10 @@ class FinanceInferenceEngine:
                         device=last_hidden.device,
                     )
                     last_hidden[:, 0, :d_len] += gate_val * delta_t
-
-                # Re-project through LM head to get corrected logits
-                logits = self.model.lm_head(last_hidden).squeeze(1)  # [1, vocab]
+                    # Re-project through LM head to get corrected logits.
+                    # NOTE: In transformers 5.x, hidden_states[-1] is ALREADY
+                    # normed (norm applied inside Qwen2Model before return).
+                    logits = self.model.lm_head(last_hidden).squeeze(1)
 
             # --- sampling (with repetition penalty over prior tokens) ---
             prev = input_ids[0].tolist()

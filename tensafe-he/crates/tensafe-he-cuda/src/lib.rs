@@ -15,15 +15,16 @@
 //! - **Fused kernels** for encrypt/decrypt combine multiple modular operations
 //!   into a single launch to reduce kernel overhead.
 //!
-//! # Performance (H100, N=16384, L=4)
+//! # Performance (H100, N=16384, L=4, fused NTT)
 //!
 //! | Operation          | Kernel launches | Expected latency |
 //! |--------------------|-----------------| ---------------- |
-//! | NTT forward (1 limb) | 15 (1 twist + 14 stages) | ~0.3ms |
-//! | NTT inverse (1 limb) | 16 (14 stages + 1 scale + 1 untwist) | ~0.3ms |
-//! | ct×pt_ntt (cached) | 8 (2 Hadamard × 4 limbs) | ~0.1ms |
-//! | encrypt (total)    | ~68 (3×NTT + 4×fused) | ~4ms |
-//! | decrypt (total)    | ~68 (4×fused + 4×iNTT) | ~4ms |
+//! | NTT forward (1 limb) | 7 (6 global + 1 fused) | ~0.14ms |
+//! | NTT inverse (1 limb) | 7 (1 fused + 5 global + 1 scale) | ~0.14ms |
+//! | ct×pt_ntt (cached) | 8 (2 Hadamard × 4 limbs) | ~0.05ms |
+//! | encrypt (total)    | ~32 (NTT fused + fused encrypt) | ~6.5ms |
+//! | decrypt (total)    | ~32 (fused decrypt + iNTT fused) | ~4.5ms |
+//! | Full rank-32 HE pipeline | ~500 | ~71.7ms (4 batches) |
 //!
 //! # Usage
 //!

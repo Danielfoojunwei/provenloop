@@ -575,3 +575,115 @@ Building TenSafe-HE gives us:
 4. **IP moat.** A custom HE library optimized for zero-rotation inference is defensible technology.
 5. **Supply chain security.** No dependency on OpenFHE's release cycle or breaking changes.
 6. **Packaging simplicity.** One pip wheel instead of OpenFHE C++ + CUDA runtime + Python bindings chain.
+
+---
+
+## SIMD & GPU Batching Gap Analysis (2026-02-26)
+
+Cross-referencing all 14 README innovations against the first-principles baseline
+(`docs/plans/first-principles-baseline.md`) identified 4 new optimizations that
+maximize SIMD slot utilization and GPU thread saturation beyond what the original
+plan covered.
+
+### Gap 1: SIMD-Aligned Rank Selection (Optimization 3.11)
+
+**Problem:** rank=32 with `cols_per_ct=5` creates 7 batches. The 7th batch packs
+only 2 of 5 columns — 60% of that batch is wasted compute. Across all batches:
+32/35 = 91.4% effective utilization.
+
+**Fix:** SVD-truncate rank from 32 to 30 (nearest multiple of `cols_per_ct`).
+6 perfectly full batches, 100% utilization.
+
+```
+rank=32: 7 batches, last 2/5 filled, 91.4% effective → 43 ms HE (A2000)
+rank=30: 6 batches, all 5/5 filled, 100% effective  → 37 ms HE (A2000)
+Savings: -6 ms (14.3% HE reduction)
+Quality: ~98.5% SVD variance retained (2 smallest singular values dropped)
+```
+
+For poly_n=32768 (cols_per_ct=10): rank 32→30 = 3 batches instead of 4 = 25% HE savings.
+
+**Implementation:** Add SIMD-alignment to `_truncate_lora_svd()` at adapter load time:
+
+```python
+def _simd_aligned_rank(self, original_rank, d_model):
+    cols_per_ct = self.simd_slots // d_model
+    return (original_rank // cols_per_ct) * cols_per_ct  # 32→30
+```
+
+### Gap 2: Multi-Session GPU Batching (Optimization 3.12)
+
+**Problem:** Single-token pipeline uses only 21% of H100 thread capacity during
+NTT (7 parallel iNTTs × 8192 butterflies = 57K threads vs 270K available).
+
+**Fix:** When B concurrent sessions each have a token ready, batch into one kernel
+launch. Grid becomes `(N/256, n_batches, B)`.
+
+```
+B=1:  57K threads,  21% GPU utilization → 6 ms HE/tok (H100)
+B=4: 229K threads,  85% GPU utilization → ~2 ms HE/tok (H100)
+B=8: 459K threads, 100% GPU utilization → ~1.5 ms HE/tok (H100)
+```
+
+Requires request-batching layer (standard for production: vLLM, TGI).
+Cross-expert batching via per-session indirection table to cached plaintexts.
+
+### Gap 3: Fused DP + Encode + Encrypt (Optimization 3.13)
+
+**Problem:** DP noise generated on CPU (`np.random.normal`), transferred to GPU.
+
+**Fix:** Generate Gaussian noise on GPU with `curand_normal_double()` inside the
+fused encode+encrypt kernel. Eliminates CPU→GPU transfer (~0.5ms) and CPU noise
+generation (~0.3ms). Savings: ~1 ms.
+
+### Gap 4: RNS-Limb-Parallel Thread Mapping (Optimization 3.14)
+
+**Problem:** Fused batch kernel loops L=4 RNS limbs per thread. Total threads =
+`n_batches × N = 7 × 16384 = 114K` → 42% GPU occupancy on H100.
+
+**Fix:** Flatten batch × limb × coefficient into one thread grid. Each thread
+handles one limb of one coefficient of one batch.
+
+```
+L-sequential: 7 × 16384 = 114K threads, 42% occupancy
+L-parallel:   7 × 4 × 16384 = 458K threads, 100%+ occupancy
+```
+
+Also improves memory coalescing (adjacent threads → adjacent coefficients within
+same RNS limb). Savings: ~2 ms on A2000.
+
+### Updated Projections (with All 4 New Optimizations)
+
+```
+                         | HE (ms) | Total (ms) | tok/s  | vs Current
+─────────────────────────|─────────|────────────|────────|──────────
+A2000 (CuKKS, current)  |   86    |    135     |  7.4   | baseline
+A2000 (TenSafe-HE)       |   36    |     85     | 11.8   | +59%
+H100 single-session      |    6    |     32     | 31.3   | +323%
+H100 multi-session B=4   |    2    |     28     | 35.7   | +382%
+Groq + H100              |    6    |      8     | 125    | +1,589%
+Groq + H100 + B=4        |    2    |      4     | 250    | +3,278%
+```
+
+### The "Max Batching" Hierarchy
+
+```
+Level 0 — SIMD Slot Packing (ZeRo-MOAI)
+  5 LoRA rows / ciphertext, 93.75% per-ct utilization (structural limit)
+  NEW: Align rank to cols_per_ct → 100% batch utilization
+
+Level 1 — ZeRo-MOAI Batch Loop
+  6-7 ct×pt + decrypts / token, fused into 1 kernel
+  NEW: RNS-limb-parallel for 4× more threads
+
+Level 2 — RNS Limb Parallelism
+  L=4 independent ops / ciphertext operation
+  NEW: Explicit in thread grid (not per-thread loop)
+
+Level 3 — Multi-Session Token Batching (NEW)
+  B concurrent sessions → 1 kernel launch
+  GPU utilization 21% → 85-100% at B≥4
+
+Level 4 — Multi-Expert Batching (CryptoMOE)
+  Per-expert cached plaintexts + cross-expert indirection table
+```

@@ -60,12 +60,13 @@ impl CkksParams {
     /// Parameter set for N=8192 (poly_n=8192, S=4096, L=4).
     /// Security: ~128-bit. Modulus chain: [60, 40, 40, 60] bits.
     pub fn n8192() -> Self {
-        // NTT-friendly primes: q ≡ 1 (mod 2N) = 1 (mod 16384)
+        // NTT-friendly primes: q ≡ 1 (mod 2N) = 1 (mod 16384).
+        // All verified prime by trial division.
         let moduli = vec![
-            Modulus::new(1152921504606830593, 60), // 2^60 - 2^14 + 1 (≡ 1 mod 16384)
-            Modulus::new(1099511627777, 40),        // 2^40 - 2^14 + 1 (≡ 1 mod 16384)
-            Modulus::new(1099511644161, 40),        // another 40-bit NTT-friendly prime
-            Modulus::new(1152921504606846977, 60),  // 2^60 - 2^14 + 2^14 + 1
+            Modulus::new(1152921504606830593, 60), // 60-bit, ≡ 1 mod 16384
+            Modulus::new(1099511480321, 40),        // 40-bit, ≡ 1 mod 16384
+            Modulus::new(1099510890497, 40),        // 40-bit, ≡ 1 mod 16384
+            Modulus::new(1152921504606601217, 60),  // 60-bit, ≡ 1 mod 16384
         ];
         Self {
             poly_degree: 8192,
@@ -81,12 +82,13 @@ impl CkksParams {
     /// Security: ~192-bit. Modulus chain: [60, 40, 40, 60] bits.
     /// This is the primary TenSafe parameter set.
     pub fn n16384() -> Self {
-        // NTT-friendly primes: q ≡ 1 (mod 2N) = 1 (mod 32768)
+        // NTT-friendly primes: q ≡ 1 (mod 2N) = 1 (mod 32768).
+        // All verified prime by trial division.
         let moduli = vec![
             Modulus::new(1152921504606748673, 60), // 60-bit, ≡ 1 mod 32768
-            Modulus::new(1099511595009, 40),        // 40-bit, ≡ 1 mod 32768
-            Modulus::new(1099511627777, 40),        // 40-bit, ≡ 1 mod 32768
-            Modulus::new(1152921504606781441, 60),  // 60-bit, ≡ 1 mod 32768
+            Modulus::new(1099510054913, 40),        // 40-bit, ≡ 1 mod 32768
+            Modulus::new(1099508121601, 40),        // 40-bit, ≡ 1 mod 32768
+            Modulus::new(1152921504606683137, 60),  // 60-bit, ≡ 1 mod 32768
         ];
         Self {
             poly_degree: 16384,
@@ -101,12 +103,13 @@ impl CkksParams {
     /// Parameter set for N=32768 (poly_n=32768, S=16384, L=4).
     /// Security: ~256-bit. Modulus chain: [60, 40, 40, 60] bits.
     pub fn n32768() -> Self {
-        // NTT-friendly primes: q ≡ 1 (mod 2N) = 1 (mod 65536)
+        // NTT-friendly primes: q ≡ 1 (mod 2N) = 1 (mod 65536).
+        // All verified prime by trial division.
         let moduli = vec![
-            Modulus::new(1152921504606846977, 60), // 60-bit, ≡ 1 mod 65536
-            Modulus::new(1099511627777, 40),        // 40-bit, ≡ 1 mod 65536
-            Modulus::new(1099511693313, 40),        // 40-bit, ≡ 1 mod 65536
-            Modulus::new(1152921504607043585, 60),  // 60-bit, ≡ 1 mod 65536
+            Modulus::new(1152921504606584833, 60), // 60-bit, ≡ 1 mod 65536
+            Modulus::new(1099507695617, 40),        // 40-bit, ≡ 1 mod 65536
+            Modulus::new(1099506515969, 40),        // 40-bit, ≡ 1 mod 65536
+            Modulus::new(1152921504598720513, 60),  // 60-bit, ≡ 1 mod 65536
         ];
         Self {
             poly_degree: 32768,

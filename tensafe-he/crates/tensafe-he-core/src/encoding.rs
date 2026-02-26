@@ -20,10 +20,6 @@ pub struct CkksEncoder {
     n: usize,
     /// Number of SIMD slots = N/2.
     num_slots: usize,
-    /// Pre-computed roots of unity for DFT: ζ^{2k+1} for k=0..N-1.
-    /// ζ = exp(2πi / 2N) = exp(πi / N).
-    roots_real: Vec<f64>,
-    roots_imag: Vec<f64>,
 }
 
 impl CkksEncoder {
@@ -32,21 +28,9 @@ impl CkksEncoder {
         let n = params.poly_degree;
         let num_slots = params.num_slots;
 
-        // Pre-compute ζ^{2k+1} for k = 0..N-1
-        // ζ = exp(2πi / 2N), so ζ^{2k+1} = exp(πi(2k+1) / N)
-        let mut roots_real = Vec::with_capacity(n);
-        let mut roots_imag = Vec::with_capacity(n);
-        for k in 0..n {
-            let angle = PI * (2 * k + 1) as f64 / n as f64;
-            roots_real.push(angle.cos());
-            roots_imag.push(angle.sin());
-        }
-
         Self {
             n,
             num_slots,
-            roots_real,
-            roots_imag,
         }
     }
 
@@ -99,9 +83,13 @@ impl CkksEncoder {
     ///
     /// Steps:
     /// 1. Convert from RNS to centered representation (signed integers)
-    /// 2. Divide by Δ to get float coefficients
+    /// 2. Divide by the given scale to get float coefficients
     /// 3. Apply canonical embedding σ to get slot values
-    pub fn decode(&self, poly: &RnsPoly, params: &CkksParams) -> Vec<f64> {
+    ///
+    /// The `scale` parameter should match the ciphertext's current scale:
+    /// - After encrypt: scale = Δ
+    /// - After ct×pt multiply: scale = Δ²
+    pub fn decode(&self, poly: &RnsPoly, params: &CkksParams, scale: f64) -> Vec<f64> {
         // Use the first RNS limb for decoding (all limbs represent the same polynomial)
         let q = params.moduli[0].value;
         let half_q = q / 2;
@@ -115,7 +103,7 @@ impl CkksEncoder {
                 } else {
                     c as f64
                 };
-                signed / SCALE
+                signed / scale
             })
             .collect();
 
@@ -136,21 +124,15 @@ impl CkksEncoder {
         assert_eq!(z.len(), s);
 
         // Build the full complex vector with conjugate symmetry:
-        // z̃[k] = z[k] for k < S, z̃[k] = conj(z̃[N-1-k]) for k >= S
-        // For real z: z̃[k] = z[k] + 0i, z̃[N-1-k] = z[k] - 0i = z[k]
+        // The canonical embedding evaluates at ζ^{2k+1} for k=0..N-1.
+        // Conjugate pair: slot k ↔ slot N-1-k (since conj(ζ^{2k+1}) = ζ^{2(N-1-k)+1}).
+        // For real z: z̃[k] = z[k], z̃[N-1-k] = z[k].
         let mut z_real = vec![0.0f64; n];
-        let mut z_imag = vec![0.0f64; n];
+        let z_imag = vec![0.0f64; n];
         for k in 0..s {
             z_real[k] = z[k];
-            z_imag[k] = 0.0;
-            // Conjugate symmetry
-            if k > 0 {
-                z_real[n - k] = z[k];
-                z_imag[n - k] = 0.0; // -0 = 0 for real input
-            }
+            z_real[n - 1 - k] = z[k];
         }
-        // z[0] maps to itself (no conjugate pair)
-        z_real[0] = z[0];
 
         // Inverse DFT: m[j] = (1/N) · Σ_{k=0}^{N-1} z̃[k] · ζ^{-(2k+1)j}
         let mut coeffs = vec![0.0f64; n];
@@ -172,6 +154,12 @@ impl CkksEncoder {
         }
 
         coeffs
+    }
+
+    /// Decode from pre-computed float64 polynomial coefficients.
+    /// Used when coefficients have already been extracted via CRT reconstruction.
+    pub fn decode_coefficients(&self, coeffs: &[f64]) -> Vec<f64> {
+        self.canonical_embedding(coeffs)
     }
 
     /// Canonical embedding: polynomial coefficients → slot values.
@@ -212,7 +200,7 @@ mod tests {
         // Encode a simple vector
         let z: Vec<f64> = (0..10).map(|i| i as f64 * 0.1).collect();
         let poly = encoder.encode(&z, &params);
-        let decoded = encoder.decode(&poly, &params);
+        let decoded = encoder.decode(&poly, &params, SCALE);
 
         // Check roundtrip accuracy
         for i in 0..z.len() {
@@ -233,7 +221,7 @@ mod tests {
 
         let z = vec![0.0f64; 100];
         let poly = encoder.encode(&z, &params);
-        let decoded = encoder.decode(&poly, &params);
+        let decoded = encoder.decode(&poly, &params, SCALE);
 
         for i in 0..z.len() {
             assert!(
@@ -251,7 +239,7 @@ mod tests {
 
         let z: Vec<f64> = (0..50).map(|i| (i as f64 - 25.0) * 100.0).collect();
         let poly = encoder.encode(&z, &params);
-        let decoded = encoder.decode(&poly, &params);
+        let decoded = encoder.decode(&poly, &params, SCALE);
 
         for i in 0..z.len() {
             let err = (decoded[i] - z[i]).abs();

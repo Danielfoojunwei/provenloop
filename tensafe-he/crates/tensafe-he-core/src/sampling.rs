@@ -48,6 +48,19 @@ pub fn sample_gaussian<R: Rng>(rng: &mut R, n: usize, q: u64, sigma: f64) -> Vec
         .collect()
 }
 
+/// Sample a discrete Gaussian error vector as signed integers.
+/// Returns i64 values (not reduced mod q) — caller is responsible for RNS reduction.
+/// This ensures cross-limb consistency when stored in multiple RNS limbs.
+pub fn sample_gaussian_signed<R: Rng>(rng: &mut R, n: usize, sigma: f64) -> Vec<i64> {
+    let normal = Normal::new(0.0, sigma).expect("Invalid sigma for Gaussian");
+    (0..n)
+        .map(|_| {
+            let sample: f64 = normal.sample(rng);
+            sample.round() as i64
+        })
+        .collect()
+}
+
 /// Sample a uniform random polynomial in Z_q^N.
 /// Used for the 'a' component in RLWE encryption.
 pub fn sample_uniform<R: Rng>(rng: &mut R, n: usize, q: u64) -> Vec<u64> {

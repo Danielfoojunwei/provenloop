@@ -7,6 +7,6 @@ description = "CUDA-accelerated CKKS backend for TenSafe-HE"
 
 [dependencies]
 tensafe-he-core = { path = "../tensafe-he-core" }
-cudarc = "0.12"
+cudarc = { version = "0.12", features = ["cuda-version-from-build-system"] }
 rand = "0.9"
 rand_distr = "0.5"

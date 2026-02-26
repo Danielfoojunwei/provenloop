@@ -10,8 +10,9 @@
 use crate::encoding::CkksEncoder;
 use crate::ntt::{negacyclic_ntt_forward, negacyclic_ntt_inverse, NttTables};
 use crate::params::CkksParams;
-use crate::rns::{mod_add, mod_mul, mod_sub, RnsPoly};
-use crate::sampling::{sample_gaussian, sample_ternary, sample_uniform, ERROR_STD_DEV};
+use crate::params::SCALE;
+use crate::rns::{mod_add, mod_inv, mod_mul, mod_sub, RnsPoly};
+use crate::sampling::{sample_gaussian_signed, sample_ternary, sample_uniform, ERROR_STD_DEV};
 use rand::Rng;
 
 /// A CKKS ciphertext: pair of RNS polynomials (c0, c1) in NTT domain.
@@ -126,11 +127,19 @@ impl CkksContext {
             negacyclic_ntt_forward(&mut a_ntt.limbs[l], &self.ntt_tables[l]);
         }
 
-        // Sample error polynomial
+        // Sample error polynomial ONCE as signed integers, then reduce to each RNS limb.
+        // This ensures cross-limb consistency (required for CRT-based decode after multiply).
+        let e_signed = sample_gaussian_signed(rng, n, ERROR_STD_DEV);
         let mut e_ntt = RnsPoly::zero(n, num_limbs);
         for l in 0..num_limbs {
             let q = self.params.moduli[l].value;
-            e_ntt.limbs[l] = sample_gaussian(rng, n, q, ERROR_STD_DEV);
+            for i in 0..n {
+                e_ntt.limbs[l][i] = if e_signed[i] >= 0 {
+                    (e_signed[i] as u64) % q
+                } else {
+                    q - ((-e_signed[i]) as u64 % q)
+                };
+            }
             negacyclic_ntt_forward(&mut e_ntt.limbs[l], &self.ntt_tables[l]);
         }
 
@@ -157,7 +166,10 @@ impl CkksContext {
 
     /// Decrypt a ciphertext to a real-valued vector.
     ///
-    /// Decrypt: m = c0 + c1·s  (element-wise in NTT domain, then iNTT + decode)
+    /// Handles both fresh ciphertexts (scale = Δ) and post-multiply
+    /// ciphertexts (scale = Δ²) by automatically rescaling when needed.
+    ///
+    /// Decrypt: m = c0 + c1·s  (element-wise in NTT domain, then iNTT + rescale + decode)
     pub fn decrypt(&self, ct: &Ciphertext, sk: &SecretKey) -> Vec<f64> {
         let n = self.params.poly_degree;
         let num_limbs = self.params.num_limbs;
@@ -177,8 +189,46 @@ impl CkksContext {
             negacyclic_ntt_inverse(&mut m_ntt.limbs[l], &self.ntt_tables[l]);
         }
 
-        // Decode
-        self.encoder.decode(&m_ntt, &self.params)
+        // After ct×pt multiply, polynomial coefficients grow to ~Δ² magnitude,
+        // which overflows individual RNS limbs. Use 2-limb CRT (q_0 × q_1 ≈ 2^100)
+        // to reconstruct the true coefficient value before decoding.
+        if ct.scale > SCALE * 1.5 && num_limbs >= 2 {
+            let q0 = self.params.moduli[0].value;
+            let q1 = self.params.moduli[1].value;
+            let q0_inv_mod_q1 = mod_inv(q0 % q1, q1);
+            let q_product: u128 = q0 as u128 * q1 as u128;
+            let half_product = q_product / 2;
+
+            let mut coeffs_f64 = vec![0.0f64; n];
+            for i in 0..n {
+                let m0 = m_ntt.limbs[0][i];
+                let m1 = m_ntt.limbs[1][i];
+
+                // CRT: M = m0 + q0 * k, where k = (m1 - m0 mod q1) * q0_inv mod q1
+                let m0_mod_q1 = (m0 as u128 % q1 as u128) as u64;
+                let diff = if m1 >= m0_mod_q1 {
+                    m1 - m0_mod_q1
+                } else {
+                    q1 - m0_mod_q1 + m1
+                };
+                let k = ((diff as u128 * q0_inv_mod_q1 as u128) % q1 as u128) as u64;
+                let m_unsigned: u128 = m0 as u128 + k as u128 * q0 as u128;
+
+                // Center: convert to signed representation
+                let m_signed_f64 = if m_unsigned > half_product {
+                    -((q_product - m_unsigned) as f64)
+                } else {
+                    m_unsigned as f64
+                };
+
+                coeffs_f64[i] = m_signed_f64 / ct.scale;
+            }
+
+            // Apply canonical embedding (DFT at roots of unity)
+            self.encoder.decode_coefficients(&coeffs_f64)
+        } else {
+            self.encoder.decode(&m_ntt, &self.params, ct.scale)
+        }
     }
 
     /// Ciphertext × plaintext multiply (the core TenSafe operation).
@@ -188,7 +238,6 @@ impl CkksContext {
     /// This is the ZeRo-MOAI inner product: after decrypt, each d_model-sized
     /// segment contains h[j] * A[r, j], and summing gives the dot product.
     pub fn ct_pt_mul(&self, ct: &Ciphertext, pt: &[f64]) -> Ciphertext {
-        let n = self.params.poly_degree;
         let num_limbs = self.params.num_limbs;
 
         // Encode plaintext and transform to NTT domain

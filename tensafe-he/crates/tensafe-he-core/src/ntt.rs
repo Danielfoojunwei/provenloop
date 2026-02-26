@@ -16,6 +16,10 @@ pub struct NttTables {
     pub forward_twiddles: Vec<u64>,
     /// Inverse twiddle factors (powers of ψ^{-1} in bit-reversed order).
     pub inverse_twiddles: Vec<u64>,
+    /// Primitive 2N-th root of unity ψ (used for negacyclic twist).
+    pub psi: u64,
+    /// ψ^{-1} mod q (used for inverse negacyclic twist).
+    pub psi_inv: u64,
     /// N^{-1} mod q — used to normalize after inverse NTT.
     pub n_inv: u64,
     /// The modulus q.
@@ -35,6 +39,7 @@ impl NttTables {
         assert_eq!(1 << log_n, n, "N must be a power of 2");
 
         let psi = find_primitive_root(n, q);
+        let psi_inv = mod_inv(psi, q);
         let forward_twiddles = compute_twiddle_factors(n, psi, q);
         let inverse_twiddles = compute_inv_twiddle_factors(n, psi, q);
         let n_inv = mod_inv(n as u64, q);
@@ -42,6 +47,8 @@ impl NttTables {
         Self {
             forward_twiddles,
             inverse_twiddles,
+            psi,
+            psi_inv,
             n_inv,
             q,
             log_n,
@@ -50,27 +57,28 @@ impl NttTables {
     }
 }
 
-/// In-place forward NTT (Cooley-Tukey butterfly, decimation-in-time).
+/// In-place negacyclic forward NTT (Cooley-Tukey butterfly).
 ///
-/// Transforms polynomial coefficients a[0..N-1] to NTT domain.
-/// The result is: A[i] = Σ_{j=0}^{N-1} a[j] · ψ^{(2·bit_rev(i)+1)·j} mod q
+/// Transforms polynomial a(X) in Z_q[X]/(X^N+1) to NTT domain.
+/// The twiddle factors are powers of ψ (primitive 2N-th root of unity),
+/// which means the negacyclic twist is baked into the butterfly — no
+/// separate twist step is needed.
 ///
-/// Uses iterative radix-2 Cooley-Tukey with pre-computed twiddle factors.
-pub fn ntt_forward(a: &mut [u64], tables: &NttTables) {
+/// Butterfly pattern (SEAL-style, ascending m):
+///   m = 1, 2, 4, ..., N/2    (number of groups doubles each stage)
+///   t = N/2, N/4, ..., 1     (group half-size halves each stage)
+///   twiddle for group i = forward_twiddles[m + i]
+pub fn negacyclic_ntt_forward(a: &mut [u64], tables: &NttTables) {
     let n = tables.n;
     let q = tables.q;
     debug_assert_eq!(a.len(), n);
 
-    let mut m = n;
-    let mut t = 1;
-    let mut twiddle_idx = 1; // start at index 1 in twiddle table
+    let mut t = n >> 1;
+    let mut m = 1;
 
     for _ in 0..tables.log_n {
-        m >>= 1;
         for i in 0..m {
-            let w = tables.forward_twiddles[twiddle_idx];
-            twiddle_idx += 1;
-
+            let w = tables.forward_twiddles[m + i];
             let j1 = 2 * i * t;
             for j in j1..j1 + t {
                 let u = a[j];
@@ -79,28 +87,31 @@ pub fn ntt_forward(a: &mut [u64], tables: &NttTables) {
                 a[j + t] = mod_sub(u, v, q);
             }
         }
-        t <<= 1;
+        t >>= 1;
+        m <<= 1;
     }
 }
 
-/// In-place inverse NTT (Gentleman-Sande butterfly, decimation-in-frequency).
+/// In-place negacyclic inverse NTT (Gentleman-Sande butterfly).
 ///
 /// Transforms NTT-domain values back to coefficient domain.
 /// Includes the 1/N normalization factor.
-pub fn ntt_inverse(a: &mut [u64], tables: &NttTables) {
+///
+/// Butterfly pattern (SEAL-style, descending m):
+///   m = N/2, N/4, ..., 1     (number of groups halves each stage)
+///   t = 1, 2, 4, ..., N/2    (group half-size doubles each stage)
+///   twiddle for group i = inverse_twiddles[m + i]
+pub fn negacyclic_ntt_inverse(a: &mut [u64], tables: &NttTables) {
     let n = tables.n;
     let q = tables.q;
     debug_assert_eq!(a.len(), n);
 
-    let mut t = n >> 1;
-    let mut m = 1;
-    let mut twiddle_idx = 1;
+    let mut t = 1;
+    let mut m = n >> 1;
 
     for _ in 0..tables.log_n {
         for i in 0..m {
-            let w = tables.inverse_twiddles[twiddle_idx];
-            twiddle_idx += 1;
-
+            let w = tables.inverse_twiddles[m + i];
             let j1 = 2 * i * t;
             for j in j1..j1 + t {
                 let u = a[j];
@@ -109,60 +120,14 @@ pub fn ntt_inverse(a: &mut [u64], tables: &NttTables) {
                 a[j + t] = mod_mul(mod_sub(u, v, q), w, q);
             }
         }
-        t >>= 1;
-        m <<= 1;
+        t <<= 1;
+        m >>= 1;
     }
 
     // Normalize by N^{-1} mod q
     for coeff in a.iter_mut() {
         *coeff = mod_mul(*coeff, tables.n_inv, q);
     }
-}
-
-/// Apply the "negacyclic twist" to a polynomial before NTT.
-/// This multiplies coefficient a[i] by ψ^i, converting standard NTT to negacyclic.
-///
-/// For CKKS: we need NTT over Z_q[X]/(X^N+1), not Z_q[X]/(X^N-1).
-/// The twist handles the +1 vs -1.
-pub fn apply_forward_twist(a: &mut [u64], tables: &NttTables) {
-    let q = tables.q;
-    let n = tables.n;
-    // ψ^i for i = 0..N-1 (ψ is the 2N-th root)
-    // forward_twiddles contains powers of ψ in bit-reversed order,
-    // but we need them in natural order for the twist.
-    // Recompute from forward_twiddles[1] = ψ (if stored that way),
-    // or compute directly.
-    let psi = tables.forward_twiddles[1]; // ψ = first non-trivial twiddle
-    let mut psi_power = 1u64;
-    for i in 0..n {
-        a[i] = mod_mul(a[i], psi_power, q);
-        psi_power = mod_mul(psi_power, psi, q);
-    }
-}
-
-/// Remove the negacyclic twist after inverse NTT.
-/// Divides coefficient a[i] by ψ^i.
-pub fn apply_inverse_twist(a: &mut [u64], tables: &NttTables) {
-    let q = tables.q;
-    let n = tables.n;
-    let psi_inv = tables.inverse_twiddles[1]; // ψ^{-1}
-    let mut psi_inv_power = 1u64;
-    for i in 0..n {
-        a[i] = mod_mul(a[i], psi_inv_power, q);
-        psi_inv_power = mod_mul(psi_inv_power, psi_inv, q);
-    }
-}
-
-/// Full negacyclic forward NTT: twist + NTT.
-pub fn negacyclic_ntt_forward(a: &mut [u64], tables: &NttTables) {
-    apply_forward_twist(a, tables);
-    ntt_forward(a, tables);
-}
-
-/// Full negacyclic inverse NTT: iNTT + untwist.
-pub fn negacyclic_ntt_inverse(a: &mut [u64], tables: &NttTables) {
-    ntt_inverse(a, tables);
-    apply_inverse_twist(a, tables);
 }
 
 #[cfg(test)]
@@ -217,9 +182,9 @@ mod tests {
         let tables = NttTables::new(n, q);
 
         // a(X) = 1 + 2X + 3X^2
-        let mut a_coeffs = vec![1u64, 2, 3, 0, 0, 0, 0, 0];
+        let a_coeffs = vec![1u64, 2, 3, 0, 0, 0, 0, 0];
         // b(X) = 4 + 5X
-        let mut b_coeffs = vec![4u64, 5, 0, 0, 0, 0, 0, 0];
+        let b_coeffs = vec![4u64, 5, 0, 0, 0, 0, 0, 0];
 
         // NTT both
         let mut a_ntt = a_coeffs.clone();

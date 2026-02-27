@@ -9,9 +9,8 @@ transformers>=4.45.0
 # ── Homomorphic Encryption ────────────────────────────────────
 # tensafe-he: native Rust CKKS via PyO3 (preferred, zero external deps)
 # Build: cd tensafe-he/crates/tensafe-he-python && maturin develop --release
-cukks>=0.1.2                  # CuKKS CKKS wrapper (fallback 1)
-# cukks-cu128>=0.1.2          # GPU backend — install separately for your CUDA version
-Pyfhel>=3.5.0                 # CPU fallback CKKS backend (fallback 2)
+# cukks>=0.1.2                # CuKKS CKKS wrapper (legacy fallback 1, replaced by tensafe-he)
+# Pyfhel>=3.5.0               # CPU fallback CKKS backend (legacy fallback 2, replaced by tensafe-he)
 
 # ── Server ────────────────────────────────────────────────────
 fastapi>=0.100.0

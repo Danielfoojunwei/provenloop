@@ -88,6 +88,7 @@ impl CkksContext {
     }
 
     /// Generate a secret key.
+    #[pyo3(signature = (seed=None))]
     fn keygen(&self, seed: Option<u64>) -> TenSafeSecretKey {
         let mut rng = match seed {
             Some(s) => TenSafeRng::from_seed(s),
@@ -98,6 +99,7 @@ impl CkksContext {
     }
 
     /// Generate a public key from a secret key.
+    #[pyo3(signature = (sk, seed=None))]
     fn keygen_public(&self, sk: &TenSafeSecretKey, seed: Option<u64>) -> TenSafePublicKey {
         let mut rng = match seed {
             Some(s) => TenSafeRng::from_seed(s),
@@ -110,9 +112,10 @@ impl CkksContext {
     /// Encrypt a float64 numpy array using the secret key.
     ///
     /// The array is padded/truncated to `num_slots` elements.
+    #[pyo3(signature = (data, sk, seed=None))]
     fn encrypt<'py>(
         &self,
-        py: Python<'py>,
+        _py: Python<'py>,
         data: PyReadonlyArray1<'py, f64>,
         sk: &TenSafeSecretKey,
         seed: Option<u64>,
@@ -134,9 +137,10 @@ impl CkksContext {
     }
 
     /// Encrypt using a public key (asymmetric encryption).
+    #[pyo3(signature = (data, pk, seed=None))]
     fn encrypt_pk<'py>(
         &self,
-        py: Python<'py>,
+        _py: Python<'py>,
         data: PyReadonlyArray1<'py, f64>,
         pk: &TenSafePublicKey,
         seed: Option<u64>,
@@ -171,7 +175,7 @@ impl CkksContext {
     /// Ciphertext × plaintext multiply.
     fn ct_pt_mul<'py>(
         &self,
-        py: Python<'py>,
+        _py: Python<'py>,
         ct: &TenSafeCiphertext,
         plaintext: PyReadonlyArray1<'py, f64>,
     ) -> PyResult<TenSafeCiphertext> {
@@ -262,7 +266,7 @@ impl TenSafeCiphertext {
     /// This is the ZeRo-MOAI hot path: `ct_prod = ct_rep * packed_pt`
     fn __mul__<'py>(
         &self,
-        py: Python<'py>,
+        _py: Python<'py>,
         other: PyReadonlyArray1<'py, f64>,
     ) -> PyResult<TenSafeCiphertext> {
         let slice = other.as_slice()?;

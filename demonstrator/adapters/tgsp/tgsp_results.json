@@ -1,7 +1,7 @@
 {
   "banking_expert": {
     "success": true,
-    "tgsp_path": "/home/user/provenloop/demonstrator/adapters/tgsp/banking_expert.tgsp",
+    "tgsp_path": "demonstrator/adapters/tgsp/banking_expert.tgsp",
     "adapter_id": "bc6c24fd6b416565",
     "input_bytes": 56961727,
     "output_bytes": 56961966,
@@ -10,7 +10,7 @@
   },
   "investment_expert": {
     "success": true,
-    "tgsp_path": "/home/user/provenloop/demonstrator/adapters/tgsp/investment_expert.tgsp",
+    "tgsp_path": "demonstrator/adapters/tgsp/investment_expert.tgsp",
     "adapter_id": "9a89748c9f4ed7d5",
     "input_bytes": 56961727,
     "output_bytes": 56961972,
@@ -19,7 +19,7 @@
   },
   "shared_attention": {
     "success": true,
-    "tgsp_path": "/home/user/provenloop/demonstrator/adapters/tgsp/shared_attention.tgsp",
+    "tgsp_path": "demonstrator/adapters/tgsp/shared_attention.tgsp",
     "adapter_id": "e72b7713ddd6b56f",
     "input_bytes": 143245023,
     "output_bytes": 143245235,

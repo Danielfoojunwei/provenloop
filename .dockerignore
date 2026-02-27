@@ -1,0 +1,30 @@
+# Git
+.git
+.gitignore
+
+# Rust build artifacts (rebuilt inside container)
+tensafe-he/target
+
+# Python caches
+__pycache__
+*.pyc
+*.pyo
+.pytest_cache
+
+# IDE
+.vscode
+.idea
+*.swp
+
+# Docker
+demonstrator/docker-compose.yml
+
+# Docs (not needed at runtime)
+docs/
+*.md
+!demonstrator/README.md
+
+# Dev files
+.env
+*.log
+relay_16k.log

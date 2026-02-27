@@ -1,3 +1,13 @@
+# TenSafe Finance Demonstrator — Docker Compose
+#
+# Run on A2000 GPU in WSL with GateLink split-phone inference:
+#   cd provenloop
+#   docker compose -f demonstrator/docker-compose.yml up --build
+#
+# Then open browser:   http://localhost:8000
+# For phone access:    python relay.py   (separate terminal)
+#                      Phone → http://<WSL-LAN-IP>:9095
+
 version: "3.8"
 
 services:
@@ -12,7 +22,7 @@ services:
       # Persist trained adapters across container restarts
       - ./adapters:/app/demonstrator/adapters
       - ./checkpoints:/app/demonstrator/checkpoints
-      # HuggingFace cache (avoid re-downloading models)
+      # HuggingFace cache (avoid re-downloading Qwen2.5-1.5B each restart)
       - hf-cache:/root/.cache/huggingface
     deploy:
       resources:
@@ -27,6 +37,11 @@ services:
       - NVIDIA_VISIBLE_DEVICES=all
       - HF_HOME=/root/.cache/huggingface
       - TRANSFORMERS_CACHE=/root/.cache/huggingface/hub
+      # A2000 (6 GB VRAM): Qwen2.5-1.5B float16 ≈ 3 GB, HE keys ≈ 0.2 GB, KV cache ≈ 1 GB
+      # Disable torch.compile to save ~0.5 GB peak memory during compilation
+      - TENSAFE_NO_COMPILE=0
+      # GateLink split inference: phone runs embed+LM head, server runs transformer+HE-LoRA
+      - TENSAFE_POLY_N=16384
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]

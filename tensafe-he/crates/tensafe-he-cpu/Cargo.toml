@@ -1,0 +1,12 @@
+[package]
+name = "tensafe-he-cpu"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "TenSafe-HE CPU backend: reference implementation for testing"
+
+[dependencies]
+tensafe-he-core = { path = "../tensafe-he-core" }
+
+[dev-dependencies]
+approx = "0.5"

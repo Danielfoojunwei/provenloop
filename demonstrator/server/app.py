@@ -9,6 +9,8 @@ Endpoints:
   GET  /api/v1/metrics           — live system metrics (HE, DP, adapters)
   GET  /api/v1/split/config      — split inference config for WASM client
   GET  /health                   — health check
+  POST /api/v1/adapters/{name}/swap — hot-swap a TGSP adapter
+  GET  /api/v1/adapters           — list loaded adapters
   /                              — static web frontend
 """
 
@@ -25,7 +27,7 @@ from typing import List, Optional
 
 import numpy as np
 import torch
-from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -41,6 +43,9 @@ logger = logging.getLogger(__name__)
 
 MOE_CONFIG = os.getenv(
     "MOE_CONFIG_PATH", "demonstrator/adapters/tgsp/moe_config.json",
+)
+TGSP_DIR = os.getenv(
+    "TGSP_DIR", "demonstrator/adapters/tgsp",
 )
 DEVICE = os.getenv("DEVICE", "cuda" if torch.cuda.is_available() else "cpu")
 
@@ -112,6 +117,7 @@ _request_stats: dict = {"total": 0, "errors": 0, "latencies_ms": []}
 
 
 engine: FinanceInferenceEngine | None = None
+marketplace = None  # AdapterMarketplace instance (initialized at startup)
 
 # Concurrency gate: limit simultaneous GPU-bound generations
 _MAX_CONCURRENT = int(os.getenv("MAX_CONCURRENT_GENERATIONS", "2"))
@@ -124,10 +130,21 @@ _gen_semaphore = asyncio.Semaphore(_MAX_CONCURRENT)
 
 @app.on_event("startup")
 async def startup():
-    global engine
+    global engine, marketplace
     logger.info("Starting inference engine ...")
     engine = FinanceInferenceEngine(moe_config_path=MOE_CONFIG, device=DEVICE)
     engine.initialize()
+
+    # Initialize marketplace registry (scans TGSP directory)
+    from .marketplace import AdapterMarketplace
+    try:
+        marketplace = AdapterMarketplace(TGSP_DIR)
+        logger.info(
+            f"Marketplace ready: {len(marketplace.list_adapters())} adapters indexed"
+        )
+    except Exception as e:
+        logger.warning(f"Marketplace init failed (non-fatal): {e}")
+        marketplace = None
     logger.info("Engine ready.")
 
 
@@ -951,6 +968,97 @@ async def split_selftest(query: str = "What is a savings account?"):
             else "FAIL — split output corrupted"
         ),
     }
+
+
+# ======================================================================
+# Adapter management (Phase 6 — marketplace hot-swap)
+# ======================================================================
+
+@app.get("/api/v1/adapters")
+async def list_adapters():
+    """List all loaded adapters with their config and marketplace metadata."""
+    if not engine or not engine._initialized:
+        return JSONResponse(
+            status_code=503,
+            content={"error": "Engine not initialized"},
+        )
+    result = {}
+    for name, adp in engine.adapters.items():
+        cfg = adp.get("config", {})
+        w = adp.get("weights", {})
+        result[name] = {
+            "adapter_id": cfg.get("adapter_id", ""),
+            "format_version": cfg.get("format_version", "1.0"),
+            "license": cfg.get("license", "unknown"),
+            "rank": cfg.get("rank", 0),
+            "alpha": cfg.get("alpha", 0),
+            "always_active": adp.get("always_active", False),
+            "gate_keywords": sorted(adp.get("gate_keywords", set())),
+            "lora_a_shape": list(w["lora_A"].shape) if "lora_A" in w else None,
+            "lora_b_shape": list(w["lora_B"].shape) if "lora_B" in w else None,
+        }
+    return {"adapters": result, "count": len(result)}
+
+
+@app.post("/api/v1/adapters/{expert_name}/swap")
+async def swap_adapter(expert_name: str, tgsp_file: UploadFile):
+    """Hot-swap a TGSP adapter without restarting the engine.
+
+    Upload a .tgsp file and the engine will parse, validate, and
+    atomically replace the named adapter slot.
+    """
+    if not engine or not engine._initialized:
+        return JSONResponse(
+            status_code=503,
+            content={"error": "Engine not initialized"},
+        )
+    try:
+        tgsp_data = await tgsp_file.read()
+        engine.swap_adapter(expert_name, tgsp_data)
+        return {
+            "status": "swapped",
+            "expert": expert_name,
+            "adapter_id": engine.adapters[expert_name]["config"].get(
+                "adapter_id", ""
+            ),
+        }
+    except ValueError as e:
+        return JSONResponse(status_code=400, content={"error": str(e)})
+    except Exception as e:
+        logger.exception(f"Adapter swap failed for {expert_name}")
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+@app.get("/api/v1/marketplace")
+async def marketplace_browse(
+    domain: Optional[str] = None,
+    tag: Optional[str] = None,
+):
+    """Browse the adapter marketplace — list available TGSP adapters."""
+    if marketplace is None:
+        return JSONResponse(
+            status_code=503,
+            content={"error": "Marketplace not initialized"},
+        )
+    if domain or tag:
+        tags = [tag] if tag else None
+        results = marketplace.search(domain=domain, tags=tags)
+        return {
+            "adapters": [
+                {
+                    "adapter_id": a.adapter_id,
+                    "name": a.name,
+                    "domain": a.domain,
+                    "description": a.description,
+                    "license": a.license,
+                    "price_per_1k_tokens": a.price_per_1k_tokens,
+                    "tags": a.tags,
+                }
+                for a in results
+            ],
+            "count": len(results),
+        }
+    return marketplace.to_dict()
 
 
 # ======================================================================

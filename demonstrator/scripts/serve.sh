@@ -11,7 +11,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 ROOT_DIR="$(dirname "$PROJECT_DIR")"
 
-export PYTHONPATH="${ROOT_DIR}/TenSafe_Extracted/src:${ROOT_DIR}/Adapter-Safety-Tensafe/src:${ROOT_DIR}/TenSafe-Homormorphically-Encrypted-LoRA-Adaptation/src:${ROOT_DIR}"
+export PYTHONPATH="${ROOT_DIR}"
 export MOE_CONFIG_PATH="${PROJECT_DIR}/adapters/tgsp/moe_config.json"
 export DEVICE="${DEVICE:-cuda}"
 

@@ -1,0 +1,15 @@
+[package]
+name = "tensafe-he-python"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Python bindings for TenSafe-HE (CKKS homomorphic encryption)"
+
+[lib]
+name = "tensafe_he"
+crate-type = ["cdylib"]
+
+[dependencies]
+tensafe-he-core = { path = "../tensafe-he-core" }
+pyo3 = { version = "0.23", features = ["extension-module"] }
+numpy = "0.23"

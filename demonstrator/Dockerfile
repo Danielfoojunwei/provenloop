@@ -1,13 +1,32 @@
 # syntax=docker/dockerfile:1
-# TenSafe Finance Demonstrator
+# TenSafe Finance Demonstrator — Multi-stage build
 # GPU-enabled container for WSL with NVIDIA A2000
 #
 # Build:   cd provenloop && docker compose -f demonstrator/docker-compose.yml build
 # Run:     docker compose -f demonstrator/docker-compose.yml up
 # Phone:   python relay.py  (separate terminal, exposes port 9095 to LAN)
+
+# ======================================================================
+# Stage 1: Build tensafe-he Rust CKKS library (PyO3 bindings)
+# This stage is cached independently — only rebuilds when Rust source changes.
+# ======================================================================
+FROM rust:1.80-slim AS rust-builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3-dev python3-pip \
+    && rm -rf /var/lib/apt/lists/*
+RUN pip install --no-cache-dir --break-system-packages maturin>=1.0
+
+COPY tensafe-he/ /build/tensafe-he/
+RUN cd /build/tensafe-he/crates/tensafe-he-python \
+    && maturin build --release \
+    && ls /build/tensafe-he/target/wheels/
+
+# ======================================================================
+# Stage 2: Runtime (no Rust toolchain — saves ~1.5GB)
+# ======================================================================
 FROM nvidia/cuda:12.1.0-runtime-ubuntu22.04
 
-# System deps + Rust toolchain (for tensafe-he PyO3 build)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3.11 python3.11-venv python3.11-dev python3-pip \
     build-essential cmake git curl \
@@ -15,21 +34,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1 \
     && python3 -m pip install --no-cache-dir --upgrade pip setuptools wheel
 
-# Install Rust (needed for maturin build of tensafe-he)
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
-ENV PATH="/root/.cargo/bin:${PATH}"
-RUN pip install --no-cache-dir maturin>=1.0
-
 WORKDIR /app
 
 # ---- Python dependencies ----
-COPY demonstrator/requirements.txt /app/demonstrator/requirements.txt
-RUN pip install --no-cache-dir -r /app/demonstrator/requirements.txt
+COPY requirements.txt /app/requirements.txt
+RUN pip install --no-cache-dir -r /app/requirements.txt
 
-# ---- TenSafe-HE: build native Rust CKKS library with PyO3 bindings ----
-COPY tensafe-he/ /app/tensafe-he/
-RUN cd /app/tensafe-he/crates/tensafe-he-python && maturin build --release \
-    && pip install --no-cache-dir /app/tensafe-he/target/wheels/tensafe_he-*.whl
+# ---- Install pre-built tensafe-he wheel from builder stage ----
+COPY --from=rust-builder /build/tensafe-he/target/wheels/tensafe_he-*.whl /tmp/
+RUN pip install --no-cache-dir /tmp/tensafe_he-*.whl && rm -f /tmp/tensafe_he-*.whl
 
 # ---- TenSafe platform module (privacy budget, split inference) ----
 COPY tensafe_platform/ /app/tensafe_platform/

@@ -27,6 +27,13 @@ pub const KERNEL_NAMES: &[&str] = &[
     "inv_twist",
     "encrypt_fused",
     "decrypt_fused",
+    // 32-bit NTT kernels (signed Montgomery reduction, ~2× faster on GPU)
+    "ntt_fwd_stage_32",
+    "ntt_inv_stage_32",
+    "ntt_fwd_fused_32",
+    "ntt_inv_fused_32",
+    "poly_hadamard_32",
+    "poly_scale_32",
 ];
 
 /// CUDA C source for all TenSafe-HE kernels.
@@ -413,6 +420,207 @@ __global__ void decrypt_fused(
     if (i < n) {
         unsigned long long c1s = gpu_mod_mul(c1[i], s[i], q, bh);
         m_out[i] = gpu_mod_add(c0[i], c1s, q);
+    }
+}
+
+// =====================================================================
+// 32-bit NTT kernels — signed Montgomery reduction (Cheddar ASPLOS '26)
+//
+// ~2× faster on GPUs: native 32-bit int throughput, halved shmem usage.
+// Signed Montgomery: fewer integer ops than Barrett, no 128-bit products.
+//
+// Montgomery form: a_mont = a * R mod q, where R = 2^32.
+// Multiply: mont_mul(a, b) = a * b * R^{-1} mod q.
+// =====================================================================
+
+// Signed Montgomery reduction.
+// Given a product p = a * b (up to 62 bits for 30-bit a, b):
+//   t = (unsigned int)(p * q_inv)       [low 32 bits]
+//   u = (p - (long long)t * q) >> 32    [high word]
+//   if u < 0: u += q
+// Result is in [0, q).
+__device__ __forceinline__ unsigned int
+gpu_mont_reduce(long long p, unsigned int q, unsigned int q_inv) {
+    unsigned int t = (unsigned int)((unsigned long long)p * (unsigned long long)q_inv);
+    int u = (int)((p - (long long)t * (long long)q) >> 32);
+    return (u < 0) ? (unsigned int)(u + (int)q) : (unsigned int)u;
+}
+
+// Montgomery modular multiply: (a * b) mod q in Montgomery form.
+__device__ __forceinline__ unsigned int
+gpu_mont_mul(unsigned int a, unsigned int b, unsigned int q, unsigned int q_inv) {
+    long long p = (long long)a * (long long)b;
+    return gpu_mont_reduce(p, q, q_inv);
+}
+
+__device__ __forceinline__ unsigned int
+gpu_mod_add_32(unsigned int a, unsigned int b, unsigned int q) {
+    unsigned int r = a + b;
+    return (r >= q) ? (r - q) : r;
+}
+
+__device__ __forceinline__ unsigned int
+gpu_mod_sub_32(unsigned int a, unsigned int b, unsigned int q) {
+    return (a >= b) ? (a - b) : (q - b + a);
+}
+
+// 32-bit forward NTT butterfly stage.
+__global__ void ntt_fwd_stage_32(
+    unsigned int* __restrict__ data,
+    const unsigned int* __restrict__ twiddles,
+    unsigned int q, unsigned int q_inv,
+    unsigned int t, unsigned int tw_offset
+) {
+    unsigned int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    unsigned int group_idx = tid / t;
+    unsigned int inner_idx = tid % t;
+    unsigned int idx0 = group_idx * 2 * t + inner_idx;
+    unsigned int idx1 = idx0 + t;
+
+    unsigned int w = twiddles[tw_offset + group_idx];
+    unsigned int u = data[idx0];
+    unsigned int v = gpu_mont_mul(data[idx1], w, q, q_inv);
+
+    data[idx0] = gpu_mod_add_32(u, v, q);
+    data[idx1] = gpu_mod_sub_32(u, v, q);
+}
+
+// 32-bit inverse NTT butterfly stage.
+__global__ void ntt_inv_stage_32(
+    unsigned int* __restrict__ data,
+    const unsigned int* __restrict__ twiddles,
+    unsigned int q, unsigned int q_inv,
+    unsigned int t, unsigned int tw_offset
+) {
+    unsigned int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    unsigned int group_idx = tid / t;
+    unsigned int inner_idx = tid % t;
+    unsigned int idx0 = group_idx * 2 * t + inner_idx;
+    unsigned int idx1 = idx0 + t;
+
+    unsigned int w = twiddles[tw_offset + group_idx];
+    unsigned int u = data[idx0];
+    unsigned int v = data[idx1];
+
+    data[idx0] = gpu_mod_add_32(u, v, q);
+    data[idx1] = gpu_mont_mul(gpu_mod_sub_32(u, v, q), w, q, q_inv);
+}
+
+// 32-bit fused forward NTT (shared memory).
+// Shared memory per block: 2*B * 4 bytes (vs 2*B * 8 bytes for 64-bit).
+__global__ void ntt_fwd_fused_32(
+    unsigned int* __restrict__ data,
+    const unsigned int* __restrict__ twiddles,
+    unsigned int q, unsigned int q_inv,
+    unsigned int log_n, unsigned int first_stage
+) {
+    extern __shared__ unsigned int smem32[];
+
+    unsigned int B = blockDim.x;
+    unsigned int segment_start = blockIdx.x * 2 * B;
+    unsigned int tid = threadIdx.x;
+
+    smem32[tid] = data[segment_start + tid];
+    smem32[tid + B] = data[segment_start + tid + B];
+    __syncthreads();
+
+    unsigned int global_m = 1u << first_stage;
+
+    for (unsigned int s = first_stage; s < log_n; s++) {
+        unsigned int global_t = 1u << (log_n - s - 1);
+        unsigned int global_tid = blockIdx.x * B + tid;
+
+        unsigned int group_idx = global_tid / global_t;
+        unsigned int inner_idx = global_tid % global_t;
+        unsigned int global_idx0 = group_idx * 2 * global_t + inner_idx;
+        unsigned int local_idx0 = global_idx0 - segment_start;
+        unsigned int local_idx1 = local_idx0 + global_t;
+
+        unsigned int w = twiddles[global_m + group_idx];
+        unsigned int u = smem32[local_idx0];
+        unsigned int v_raw = smem32[local_idx1];
+        __syncthreads();
+
+        unsigned int v = gpu_mont_mul(v_raw, w, q, q_inv);
+        smem32[local_idx0] = gpu_mod_add_32(u, v, q);
+        smem32[local_idx1] = gpu_mod_sub_32(u, v, q);
+        __syncthreads();
+
+        global_m <<= 1;
+    }
+
+    data[segment_start + tid] = smem32[tid];
+    data[segment_start + tid + B] = smem32[tid + B];
+}
+
+// 32-bit fused inverse NTT (shared memory).
+__global__ void ntt_inv_fused_32(
+    unsigned int* __restrict__ data,
+    const unsigned int* __restrict__ twiddles,
+    unsigned int q, unsigned int q_inv,
+    unsigned int num_fused_stages
+) {
+    extern __shared__ unsigned int smem32[];
+
+    unsigned int B = blockDim.x;
+    unsigned int segment_start = blockIdx.x * 2 * B;
+    unsigned int tid = threadIdx.x;
+
+    smem32[tid] = data[segment_start + tid];
+    smem32[tid + B] = data[segment_start + tid + B];
+    __syncthreads();
+
+    for (unsigned int s = 0; s < num_fused_stages; s++) {
+        unsigned int global_t = 1u << s;
+        unsigned int global_tid = blockIdx.x * B + tid;
+
+        unsigned int group_idx = global_tid / global_t;
+        unsigned int inner_idx = global_tid % global_t;
+        unsigned int global_idx0 = group_idx * 2 * global_t + inner_idx;
+        unsigned int local_idx0 = global_idx0 - segment_start;
+        unsigned int local_idx1 = local_idx0 + global_t;
+
+        unsigned int N = gridDim.x * 2 * B;
+        unsigned int inv_m = N >> (s + 1);
+
+        unsigned int w = twiddles[inv_m + group_idx];
+        unsigned int u = smem32[local_idx0];
+        unsigned int v = smem32[local_idx1];
+        __syncthreads();
+
+        smem32[local_idx0] = gpu_mod_add_32(u, v, q);
+        smem32[local_idx1] = gpu_mont_mul(gpu_mod_sub_32(u, v, q), w, q, q_inv);
+        __syncthreads();
+    }
+
+    data[segment_start + tid] = smem32[tid];
+    data[segment_start + tid + B] = smem32[tid + B];
+}
+
+// 32-bit Hadamard product: out[i] = mont_mul(a[i], b[i]).
+__global__ void poly_hadamard_32(
+    unsigned int* __restrict__ out,
+    const unsigned int* __restrict__ a,
+    const unsigned int* __restrict__ b,
+    unsigned int q, unsigned int q_inv,
+    unsigned int n
+) {
+    unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) {
+        out[i] = gpu_mont_mul(a[i], b[i], q, q_inv);
+    }
+}
+
+// 32-bit scale: data[i] = mont_mul(data[i], scalar) for iNTT normalization.
+__global__ void poly_scale_32(
+    unsigned int* __restrict__ data,
+    unsigned int scalar,
+    unsigned int q, unsigned int q_inv,
+    unsigned int n
+) {
+    unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) {
+        data[i] = gpu_mont_mul(data[i], scalar, q, q_inv);
     }
 }
 

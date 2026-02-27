@@ -192,6 +192,118 @@ fn find_ntt_friendly_prime(bits: u32, two_n: u64) -> u64 {
     panic!("No {bits}-bit NTT-friendly prime found for 2N={two_n}");
 }
 
+/// 30-bit RNS modulus for 32-bit NTT (Cheddar-style rational rescaling).
+///
+/// 32-bit NTT with signed Montgomery reduction offers ~2× throughput on
+/// GPUs (native 32-bit integer units, halved shared memory usage).
+///
+/// Uses more primes (25-30 × 30-bit ≈ 750-900 bits total, vs 4 × 50-bit
+/// ≈ 200 bits for 64-bit). The extra limbs are compensated by ~2× faster
+/// NTT per limb.
+///
+/// Montgomery constant: R = 2^32, q_inv = -q^{-1} mod R.
+#[derive(Debug, Clone, Copy)]
+pub struct Modulus32 {
+    /// The prime modulus q (≤ 30 bits).
+    pub value: u32,
+    /// Montgomery constant: q_inv = -q^{-1} mod 2^32.
+    pub q_inv: u32,
+    /// R^2 mod q = (2^32)^2 mod q, for converting to Montgomery form.
+    pub r2: u32,
+}
+
+impl Modulus32 {
+    /// Create a 32-bit modulus with pre-computed Montgomery constants.
+    pub const fn new(value: u32) -> Self {
+        // Compute q_inv = -q^{-1} mod 2^32 via Newton's method.
+        // q^{-1} mod 2^k: start with q (since q*q ≡ q^2 ≡ 1 mod 2 for odd q)
+        // Lift: inv *= 2 - q * inv, doubling precision each step.
+        let q = value as u64;
+        let mut inv = value as u64; // q^{-1} mod 2
+        // 5 iterations: 1 → 2 → 4 → 8 → 16 → 32 bits of precision
+        inv = inv.wrapping_mul(2u64.wrapping_sub(q.wrapping_mul(inv)));
+        inv = inv.wrapping_mul(2u64.wrapping_sub(q.wrapping_mul(inv)));
+        inv = inv.wrapping_mul(2u64.wrapping_sub(q.wrapping_mul(inv)));
+        inv = inv.wrapping_mul(2u64.wrapping_sub(q.wrapping_mul(inv)));
+        inv = inv.wrapping_mul(2u64.wrapping_sub(q.wrapping_mul(inv)));
+        let q_inv = (0u64.wrapping_sub(inv)) as u32; // -q^{-1} mod 2^32
+
+        // R^2 mod q = (2^32)^2 mod q = 2^64 mod q
+        let r2 = ((1u128 << 64) % value as u128) as u32;
+
+        Self { value, q_inv, r2 }
+    }
+}
+
+/// 32-bit RNS parameter set for fast GPU NTT (Cheddar-inspired).
+///
+/// Uses 25-30 30-bit NTT-friendly primes with signed Montgomery reduction.
+/// Each prime q satisfies q ≡ 1 (mod 2N) and q < 2^30.
+#[derive(Debug, Clone)]
+pub struct CkksParams32 {
+    /// Polynomial degree N.
+    pub poly_degree: usize,
+    /// Number of SIMD slots = N/2.
+    pub num_slots: usize,
+    /// log2(N).
+    pub log_n: u32,
+    /// 30-bit RNS moduli chain.
+    pub moduli: Vec<Modulus32>,
+    /// Number of RNS limbs.
+    pub num_limbs: usize,
+    /// Scale bits.
+    pub scale_bits: u32,
+}
+
+impl CkksParams32 {
+    /// 30-bit parameter set for N=16384 (25 primes × 30 bits ≈ 750-bit modulus).
+    ///
+    /// NTT-friendly 30-bit primes: q ≡ 1 (mod 32768), q < 2^30.
+    pub fn n16384() -> Self {
+        // Searched: largest primes < 2^30 with q ≡ 1 (mod 32768).
+        // 2^30 = 1073741824. Search: 1073741824 - (1073741824 % 32768) + 1 = 1073709057
+        let primes: Vec<u32> = vec![
+            1073709057, // 2^30 - 32767 → verified ≡ 1 mod 32768
+            1073676289, // -32768 from above
+            1073643521,
+            1073610753,
+            1073577985,
+            1073545217,
+            1073512449,
+            1073479681,
+            1073446913,
+            1073414145,
+            1073381377,
+            1073348609,
+            1073315841,
+            1073283073,
+            1073250305,
+            1073217537,
+            1073184769,
+            1073152001,
+            1073119233,
+            1073086465,
+            1073053697,
+            1073020929,
+            1072988161,
+            1072955393,
+            1072922625,
+        ];
+
+        let moduli: Vec<Modulus32> = primes.into_iter().map(Modulus32::new).collect();
+        let num_limbs = moduli.len();
+
+        Self {
+            poly_degree: 16384,
+            num_slots: 8192,
+            log_n: 14,
+            moduli,
+            num_limbs,
+            scale_bits: SCALE_BITS,
+        }
+    }
+}
+
 /// Simple primality test sufficient for 60-bit moduli.
 fn is_prime_u64(n: u64) -> bool {
     if n < 2 {

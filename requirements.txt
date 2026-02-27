@@ -5,6 +5,8 @@
 # ── Core ML ───────────────────────────────────────────────────
 torch>=2.6.0
 transformers>=4.45.0
+flash-attn>=2.0                  # Flash Attention v2 (optional, falls back to SDPA)
+autoawq>=0.2.0                   # AWQ INT4 quantization (optional, set TENSAFE_AWQ=1)
 
 # ── Homomorphic Encryption ────────────────────────────────────
 # tensafe-he: native Rust CKKS via PyO3 (preferred, zero external deps)

@@ -1,13 +1,17 @@
-"""TCP relay: 0.0.0.0:9090 -> 127.0.0.1:8090 (exposes WSL to LAN).
+"""TCP relay: 0.0.0.0:9095 -> 127.0.0.1:8000 (exposes WSL Docker to LAN).
 
 Handles large file transfers (446 MB weight download) with big buffers.
 Logs connection activity so we can debug phone issues.
+
+Usage:
+    python relay.py              # relay 9095 → 8000 (Docker default)
+    python relay.py 8095         # relay 9095 → 8095 (bare-metal server)
 """
 import asyncio
 import sys
 import time
 
-LOCAL = ("127.0.0.1", 8095)
+LOCAL = ("127.0.0.1", int(sys.argv[1]) if len(sys.argv) > 1 else 8000)
 LISTEN = ("0.0.0.0", 9095)
 BUF = 1024 * 1024  # 1 MB chunks for large weight downloads
 

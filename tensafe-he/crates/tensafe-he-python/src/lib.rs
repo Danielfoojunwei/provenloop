@@ -133,6 +133,7 @@ impl CkksContext {
         Ok(TenSafeCiphertext {
             inner: ct,
             num_slots: self.num_slots,
+            cached_ctx: None,
         })
     }
 
@@ -158,6 +159,7 @@ impl CkksContext {
         Ok(TenSafeCiphertext {
             inner: ct,
             num_slots: self.num_slots,
+            cached_ctx: None,
         })
     }
 
@@ -188,6 +190,7 @@ impl CkksContext {
         Ok(TenSafeCiphertext {
             inner: result,
             num_slots: self.num_slots,
+            cached_ctx: None,
         })
     }
 
@@ -197,6 +200,7 @@ impl CkksContext {
         TenSafeCiphertext {
             inner: result,
             num_slots: self.num_slots,
+            cached_ctx: None,
         }
     }
 
@@ -206,6 +210,7 @@ impl CkksContext {
         TenSafeCiphertext {
             inner: result,
             num_slots: self.num_slots,
+            cached_ctx: None,
         }
     }
 
@@ -215,7 +220,56 @@ impl CkksContext {
         TenSafeCiphertext {
             inner: result,
             num_slots: self.num_slots,
+            cached_ctx: None,
         }
+    }
+
+    /// Batch encrypt multiple numpy arrays (one encrypt call per array).
+    /// Returns a list of ciphertexts. More efficient than individual calls
+    /// as RNG state is maintained across encryptions.
+    #[pyo3(signature = (arrays, sk, seed=None))]
+    fn batch_encrypt<'py>(
+        &self,
+        _py: Python<'py>,
+        arrays: Vec<PyReadonlyArray1<'py, f64>>,
+        sk: &TenSafeSecretKey,
+        seed: Option<u64>,
+    ) -> PyResult<Vec<TenSafeCiphertext>> {
+        let mut rng = match seed {
+            Some(s) => TenSafeRng::from_seed(s),
+            None => TenSafeRng::from_entropy(),
+        };
+
+        let mut results = Vec::with_capacity(arrays.len());
+        for arr in &arrays {
+            let slice = arr.as_slice()?;
+            let mut padded = vec![0.0f64; self.num_slots];
+            let n = slice.len().min(self.num_slots);
+            padded[..n].copy_from_slice(&slice[..n]);
+
+            let ct = self.ctx.encrypt(&padded, &sk.inner, &mut rng);
+            results.push(TenSafeCiphertext {
+                inner: ct,
+                num_slots: self.num_slots,
+                cached_ctx: None,
+            });
+        }
+        Ok(results)
+    }
+
+    /// Batch decrypt multiple ciphertexts. Returns a list of numpy arrays.
+    fn batch_decrypt<'py>(
+        &self,
+        py: Python<'py>,
+        cts: Vec<PyRef<'py, TenSafeCiphertext>>,
+        sk: &TenSafeSecretKey,
+    ) -> Vec<Bound<'py, PyArray1<f64>>> {
+        cts.iter()
+            .map(|ct| {
+                let decoded = self.ctx.decrypt(&ct.inner, &sk.inner);
+                PyArray1::from_vec(py, decoded)
+            })
+            .collect()
     }
 
     /// Check if this backend is available (always true for Rust native).
@@ -257,6 +311,21 @@ struct TenSafePublicKey {
 struct TenSafeCiphertext {
     inner: Ciphertext,
     num_slots: usize,
+    /// Cached context for operator overloading (avoids re-creating per __mul__ call).
+    /// Lazily initialized on first use.
+    cached_ctx: Option<CoreContext>,
+}
+
+impl TenSafeCiphertext {
+    /// Get or create a CoreContext for this ciphertext's parameters.
+    /// Uses cached version if available, otherwise creates and caches a new one.
+    fn ensure_ctx(&mut self) {
+        if self.cached_ctx.is_none() {
+            let poly_degree = self.inner.c0.limbs[0].len();
+            let params = CkksParams::for_degree(poly_degree);
+            self.cached_ctx = Some(CoreContext::new(params));
+        }
+    }
 }
 
 #[pymethods]
@@ -265,51 +334,50 @@ impl TenSafeCiphertext {
     ///
     /// This is the ZeRo-MOAI hot path: `ct_prod = ct_rep * packed_pt`
     fn __mul__<'py>(
-        &self,
+        &mut self,
         _py: Python<'py>,
         other: PyReadonlyArray1<'py, f64>,
     ) -> PyResult<TenSafeCiphertext> {
         let slice = other.as_slice()?;
 
-        // We need a CkksContext to do the multiply (for encoding + NTT).
-        // For __mul__, we create a temporary context from the ciphertext's params.
-        // This is lightweight — just recomputes NTT tables (cached after first call).
-        let poly_degree = self.inner.c0.limbs[0].len();
-        let params = CkksParams::for_degree(poly_degree);
-        let ctx = CoreContext::new(params);
-
-        let mut padded = vec![0.0f64; self.num_slots];
-        let n = slice.len().min(self.num_slots);
+        self.ensure_ctx();
+        let num_slots = self.num_slots;
+        let mut padded = vec![0.0f64; num_slots];
+        let n = slice.len().min(num_slots);
         padded[..n].copy_from_slice(&slice[..n]);
 
+        let ctx = self.cached_ctx.as_ref().unwrap();
         let result = ctx.ct_pt_mul(&self.inner, &padded);
         Ok(TenSafeCiphertext {
             inner: result,
-            num_slots: self.num_slots,
+            num_slots,
+            cached_ctx: None,
         })
     }
 
     /// Ciphertext + Ciphertext addition.
-    fn __add__(&self, other: &TenSafeCiphertext) -> TenSafeCiphertext {
-        let poly_degree = self.inner.c0.limbs[0].len();
-        let params = CkksParams::for_degree(poly_degree);
-        let ctx = CoreContext::new(params);
+    fn __add__(&mut self, other: &TenSafeCiphertext) -> TenSafeCiphertext {
+        self.ensure_ctx();
+        let num_slots = self.num_slots;
+        let ctx = self.cached_ctx.as_ref().unwrap();
         let result = ctx.ct_add(&self.inner, &other.inner);
         TenSafeCiphertext {
             inner: result,
-            num_slots: self.num_slots,
+            num_slots,
+            cached_ctx: None,
         }
     }
 
     /// Ciphertext - Ciphertext subtraction.
-    fn __sub__(&self, other: &TenSafeCiphertext) -> TenSafeCiphertext {
-        let poly_degree = self.inner.c0.limbs[0].len();
-        let params = CkksParams::for_degree(poly_degree);
-        let ctx = CoreContext::new(params);
+    fn __sub__(&mut self, other: &TenSafeCiphertext) -> TenSafeCiphertext {
+        self.ensure_ctx();
+        let num_slots = self.num_slots;
+        let ctx = self.cached_ctx.as_ref().unwrap();
         let result = ctx.ct_sub(&self.inner, &other.inner);
         TenSafeCiphertext {
             inner: result,
-            num_slots: self.num_slots,
+            num_slots,
+            cached_ctx: None,
         }
     }
 

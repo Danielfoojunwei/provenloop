@@ -69,8 +69,17 @@ pub use poly::{GpuRnsPoly, CompletionEvent};
 
 use cudarc::driver::{DriverError, LaunchConfig};
 
-/// CUDA thread block size for all kernels.
+/// Default CUDA thread block size.
+/// A2000 (GA106, 26 SMs) benefits from 128; H100 (132 SMs) from 256.
+/// Use `optimal_block_size()` for runtime selection.
 pub const BLOCK_SIZE: u32 = 256;
+
+/// Select block size based on GPU architecture.
+/// Smaller GPUs (≤32 SMs, e.g. A2000/GA106) benefit from 128 to reduce
+/// register pressure. Larger GPUs benefit from 256 for higher occupancy.
+pub fn optimal_block_size(sm_count: u32) -> u32 {
+    if sm_count <= 32 { 128 } else { 256 }
+}
 
 /// Result type for GPU operations.
 pub type GpuResult<T> = Result<T, GpuError>;

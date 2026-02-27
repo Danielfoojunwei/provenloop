@@ -1,9 +1,32 @@
 # syntax=docker/dockerfile:1
-# TenSafe Finance Demonstrator
+# TenSafe Finance Demonstrator — Multi-stage build
 # GPU-enabled container for WSL with NVIDIA A2000
+#
+# Build:   cd provenloop && docker compose -f demonstrator/docker-compose.yml build
+# Run:     docker compose -f demonstrator/docker-compose.yml up
+# Phone:   python relay.py  (separate terminal, exposes port 9095 to LAN)
+
+# ======================================================================
+# Stage 1: Build tensafe-he Rust CKKS library (PyO3 bindings)
+# This stage is cached independently — only rebuilds when Rust source changes.
+# ======================================================================
+FROM rust:1.80-slim AS rust-builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3-dev python3-pip \
+    && rm -rf /var/lib/apt/lists/*
+RUN pip install --no-cache-dir --break-system-packages maturin>=1.0
+
+COPY tensafe-he/ /build/tensafe-he/
+RUN cd /build/tensafe-he/crates/tensafe-he-python \
+    && maturin build --release \
+    && ls /build/tensafe-he/target/wheels/
+
+# ======================================================================
+# Stage 2: Runtime (no Rust toolchain — saves ~1.5GB)
+# ======================================================================
 FROM nvidia/cuda:12.1.0-runtime-ubuntu22.04
 
-# System deps
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3.11 python3.11-venv python3.11-dev python3-pip \
     build-essential cmake git curl \
@@ -14,8 +37,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 # ---- Python dependencies ----
-COPY demonstrator/requirements.txt /app/demonstrator/requirements.txt
-RUN pip install --no-cache-dir -r /app/demonstrator/requirements.txt
+COPY requirements.txt /app/requirements.txt
+RUN pip install --no-cache-dir -r /app/requirements.txt
+
+# ---- Install pre-built tensafe-he wheel from builder stage ----
+COPY --from=rust-builder /build/tensafe-he/target/wheels/tensafe_he-*.whl /tmp/
+RUN pip install --no-cache-dir /tmp/tensafe_he-*.whl && rm -f /tmp/tensafe_he-*.whl
 
 # ---- TenSafe platform module (privacy budget, split inference) ----
 COPY tensafe_platform/ /app/tensafe_platform/
@@ -24,17 +51,6 @@ COPY tensafe_platform/ /app/tensafe_platform/
 COPY demonstrator/ /app/demonstrator/
 
 # ---- Legacy project sources (external repos, optional) ----
-# TenSafe_Extracted/, Adapter-Safety-Tensafe/, and
-# TenSafe-Homormorphically-Encrypted-LoRA-Adaptation/ are separate git
-# repos.  When present at the Docker build context root they are copied
-# in; when absent, the build still succeeds — the inference engine falls
-# back to its built-in CKKS emulator.
-#
-# To include them, clone the repos next to this repo before building:
-#   git clone <url> ../TenSafe_Extracted
-#   git clone <url> ../Adapter-Safety-Tensafe
-#   git clone <url> ../TenSafe-Homormorphically-Encrypted-LoRA-Adaptation
-#   docker compose build
 RUN --mount=type=bind,source=.,target=/build_ctx \
     cp -r /build_ctx/TenSafe_Extracted/src /app/TenSafe_Extracted/src 2>/dev/null || true && \
     cp -r /build_ctx/Adapter-Safety-Tensafe/src /app/Adapter-Safety-Tensafe/src 2>/dev/null || true && \
@@ -44,15 +60,14 @@ RUN --mount=type=bind,source=.,target=/build_ctx \
 RUN mkdir -p /app/demonstrator/adapters/tgsp /app/demonstrator/checkpoints
 
 # ---- Environment ----
-# /app is on PYTHONPATH so both `demonstrator.*` and `tensafe_platform.*` are importable.
-# Legacy source paths are added only when the external repos were present at build time.
 ENV PYTHONPATH=/app
 ENV MOE_CONFIG_PATH=/app/demonstrator/adapters/tgsp/moe_config.json
 ENV DEVICE=cuda
 ENV PYTHONUNBUFFERED=1
 
+# Server on 8000 (API + frontend)
 EXPOSE 8000
 
-# Default: serve inference. Override with training scripts as needed.
+# Default: serve inference with GateLink split enabled
 CMD ["python3", "-m", "uvicorn", "demonstrator.server.app:app", \
      "--host", "0.0.0.0", "--port", "8000", "--log-level", "info"]

@@ -97,14 +97,13 @@ mod tests {
     use super::*;
     use crate::ciphertext::CkksContext;
     use crate::params::CkksParams;
-    use rand::SeedableRng;
-    use rand::rngs::StdRng;
+    use crate::rng::TenSafeRng;
 
     #[test]
     fn test_pk_serialize_roundtrip() {
         let params = CkksParams::for_degree(8192);
         let ctx = CkksContext::new(params.clone());
-        let mut rng = StdRng::seed_from_u64(42);
+        let mut rng = TenSafeRng::from_seed(42);
         let sk = ctx.keygen(&mut rng);
         let pk = ctx.keygen_public(&sk, &mut rng);
 
@@ -122,7 +121,7 @@ mod tests {
     fn test_ct_serialize_roundtrip() {
         let params = CkksParams::for_degree(8192);
         let ctx = CkksContext::new(params.clone());
-        let mut rng = StdRng::seed_from_u64(42);
+        let mut rng = TenSafeRng::from_seed(42);
         let sk = ctx.keygen(&mut rng);
 
         let z: Vec<f64> = (0..10).map(|i| i as f64).collect();

@@ -10,27 +10,13 @@ torch>=2.1.0
 transformers>=4.36.0
 datasets>=2.16.0
 peft>=0.7.0
-accelerate>=0.25.0
-safetensors>=0.4.0
-sentencepiece
 
-# === Homomorphic Encryption (CKKS via OpenFHE) ===
-# CuKKS: GPU-accelerated CKKS built on OpenFHE
-# Install from: https://github.com/devUuung/CuKKS
-# pip install cukks  (or build from source with CUDA support)
-openfhe>=0.8.0
+# === Homomorphic Encryption ===
+# tensafe-he: native Rust CKKS via PyO3 (preferred, zero external deps)
+# Build: cd tensafe-he/crates/tensafe-he-python && maturin develop --release
 
 # === Post-Quantum Cryptography ===
-# liboqs: Kyber768 (ML-KEM) + Dilithium3 (ML-DSA)
-liboqs-python>=0.9.0
+# tensafe-pqc: custom Kyber768 + Dilithium3 using shared NTT (built with tensafe-he)
 
 # === Numerical ===
 numpy>=1.24.0
-scipy>=1.11.0
-
-# === Crypto ===
-cryptography>=41.0.0
-PyJWT>=2.8.0
-
-# === Utilities ===
-tqdm

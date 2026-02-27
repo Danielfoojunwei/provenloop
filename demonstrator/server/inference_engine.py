@@ -145,6 +145,81 @@ class _PurePythonCKKS:
         }
 
 
+class _TenSafeHEAdapter:
+    """Adapts the tensafe_he Rust CKKS library to the engine's encrypt/decrypt API.
+
+    This is the preferred backend (Try 0) — zero external dependencies,
+    pure Rust CKKS via PyO3 bindings. Replaces CuKKS/OpenFHE/Pyfhel.
+    """
+
+    def __init__(self, ctx, sk):
+        self._ctx = ctx
+        self._sk = sk
+        self._slots = ctx.num_slots
+        self._metrics = {
+            "total_encryptions": 0,
+            "total_decryptions": 0,
+            "total_encrypt_ms": 0.0,
+            "total_decrypt_ms": 0.0,
+        }
+
+    def encrypt_vector(self, data: np.ndarray):
+        self._metrics["total_encryptions"] += 1
+        t0 = time.perf_counter()
+        padded = np.zeros(self._slots, dtype=np.float64)
+        flat = data.flatten().astype(np.float64)
+        n = min(len(flat), self._slots)
+        padded[:n] = flat[:n]
+        ct = self._ctx.encrypt(padded, self._sk)
+        elapsed = (time.perf_counter() - t0) * 1000
+        self._metrics["total_encrypt_ms"] += elapsed
+        return ct
+
+    def decrypt_vector(self, ct) -> np.ndarray:
+        self._metrics["total_decryptions"] += 1
+        t0 = time.perf_counter()
+        if isinstance(ct, _EmulatedCiphertext):
+            result = ct.decrypt()
+        else:
+            dec = self._ctx.decrypt(ct, self._sk)
+            result = np.asarray(dec, dtype=np.float64)
+        elapsed = (time.perf_counter() - t0) * 1000
+        self._metrics["total_decrypt_ms"] += elapsed
+        return result
+
+    def decrypt_to_gpu(self, ct):
+        """Decrypt ciphertext. Returns numpy for CPU backend (API compat).
+
+        The Rust CPU backend returns numpy directly. For GPU backend
+        (future tensafe-he-cuda PyO3 bindings), this would return a torch.Tensor.
+        """
+        self._metrics["total_decryptions"] += 1
+        t0 = time.perf_counter()
+        if isinstance(ct, _EmulatedCiphertext):
+            result = ct.decrypt()
+        else:
+            dec = self._ctx.decrypt(ct, self._sk)
+            result = np.asarray(dec, dtype=np.float64)
+        elapsed = (time.perf_counter() - t0) * 1000
+        self._metrics["total_decrypt_ms"] += elapsed
+        return result
+
+    def status(self) -> dict:
+        info = self._ctx.get_backend_info()
+        return {
+            "backend": info.get("backend", "tensafe-he-native"),
+            "version": info.get("version", "0.1.0"),
+            "initialized": True,
+            "gpu_available": False,
+            "gpu_enabled": False,
+            "gpu_accelerated": False,
+            "gpu_device": None,
+            "poly_mod_degree": self._slots * 2,
+            "emulated": False,
+            "metrics": dict(self._metrics),
+        }
+
+
 class _CuKKSAdapter:
     """Adapts the cukks GPU package to the engine's encrypt/decrypt API."""
 
@@ -517,8 +592,32 @@ class FinanceInferenceEngine:
         logger.info("Inference engine ready.")
 
     def _init_ckks(self):
-        """Initialise CKKS backend: CuKKS (GPU) → Pyfhel → pure-Python emulator."""
+        """Initialise CKKS backend: TenSafe-HE (Rust) → CuKKS (GPU) → Pyfhel → pure-Python emulator."""
         hec = self.moe_config["he_config"]
+
+        # --- Try 0: TenSafe-HE native (Rust CKKS via PyO3, our own library) ---
+        try:
+            import tensafe_he
+
+            poly_n = int(os.environ.get("TENSAFE_POLY_N", "0"))
+            if poly_n not in (8192, 16384, 32768):
+                poly_n = hec["poly_modulus_degree"]
+
+            ctx = tensafe_he.CkksContext(poly_mod_degree=poly_n)
+            sk = ctx.keygen()
+            self._tensafe_sk = sk
+
+            self._cukks = _TenSafeHEAdapter(ctx, sk)
+            self.he_ctx = self._cukks
+            self.simd_slots = ctx.num_slots
+
+            logger.info(
+                f"TenSafe-HE native (Rust) ready: poly_n={ctx.poly_mod_degree} "
+                f"slots={self.simd_slots} (CPU, zero external deps)"
+            )
+            return
+        except (ImportError, Exception) as e:
+            logger.warning(f"TenSafe-HE native unavailable: {e}")
 
         # --- Try 1: CuKKS GPU-accelerated CKKS (production, OpenFHE backend) ---
         try:

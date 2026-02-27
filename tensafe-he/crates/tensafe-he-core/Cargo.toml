@@ -6,8 +6,8 @@ license.workspace = true
 description = "TenSafe-HE core: CKKS parameters, RNS arithmetic, encoding, NTT, ciphertext operations"
 
 [dependencies]
-rand = "0.9"
-rand_distr = "0.5"
+# Zero external dependencies — all crypto primitives are self-contained.
+# ChaCha20 RNG (rng.rs), Box-Muller Gaussian (rng.rs), rejection sampling (rng.rs).
 
 [dev-dependencies]
 approx = "0.5"

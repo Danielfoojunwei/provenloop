@@ -11,9 +11,9 @@ use crate::encoding::CkksEncoder;
 use crate::ntt::{negacyclic_ntt_forward, negacyclic_ntt_inverse, NttTables};
 use crate::params::CkksParams;
 use crate::params::SCALE;
+use crate::rng::TenSafeRng;
 use crate::rns::{mod_add, mod_inv, mod_mul_barrett, mod_sub, RnsPoly};
 use crate::sampling::{sample_gaussian_signed, sample_ternary, sample_uniform, ERROR_STD_DEV};
-use rand::Rng;
 
 /// A CKKS ciphertext: pair of RNS polynomials (c0, c1) in NTT domain.
 #[derive(Debug, Clone)]
@@ -74,7 +74,7 @@ impl CkksContext {
     }
 
     /// Generate a secret key.
-    pub fn keygen<R: Rng>(&self, rng: &mut R) -> SecretKey {
+    pub fn keygen(&self, rng: &mut TenSafeRng) -> SecretKey {
         let n = self.params.poly_degree;
         let num_limbs = self.params.num_limbs;
 
@@ -111,7 +111,7 @@ impl CkksContext {
     ///
     /// The client generates (sk, pk), sends pk to the server.
     /// The server can encrypt using pk; only the client can decrypt with sk.
-    pub fn keygen_public<R: Rng>(&self, sk: &SecretKey, rng: &mut R) -> PublicKey {
+    pub fn keygen_public(&self, sk: &SecretKey, rng: &mut TenSafeRng) -> PublicKey {
         let n = self.params.poly_degree;
         let num_limbs = self.params.num_limbs;
 
@@ -164,11 +164,11 @@ impl CkksContext {
     ///   c0 = -a·s + m + e
     ///   c1 = a
     ///   Decrypt: c0 + c1·s = m + e
-    pub fn encrypt<R: Rng>(
+    pub fn encrypt(
         &self,
         z: &[f64],
         sk: &SecretKey,
-        rng: &mut R,
+        rng: &mut TenSafeRng,
     ) -> Ciphertext {
         let n = self.params.poly_degree;
         let num_limbs = self.params.num_limbs;
@@ -237,11 +237,11 @@ impl CkksContext {
     ///   c1 = a·u + e1
     ///
     /// Only the holder of sk can decrypt (since b = -a·s + e_pk).
-    pub fn encrypt_pk<R: Rng>(
+    pub fn encrypt_pk(
         &self,
         z: &[f64],
         pk: &PublicKey,
-        rng: &mut R,
+        rng: &mut TenSafeRng,
     ) -> Ciphertext {
         let n = self.params.poly_degree;
         let num_limbs = self.params.num_limbs;
@@ -548,13 +548,12 @@ impl CkksContext {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rand::SeedableRng;
-    use rand::rngs::StdRng;
+    use crate::rng::TenSafeRng;
 
     fn make_ctx_and_key() -> (CkksContext, SecretKey) {
         let params = CkksParams::for_degree(8192);
         let ctx = CkksContext::new(params);
-        let mut rng = StdRng::seed_from_u64(42);
+        let mut rng = TenSafeRng::from_seed(42);
         let sk = ctx.keygen(&mut rng);
         (ctx, sk)
     }
@@ -562,7 +561,7 @@ mod tests {
     #[test]
     fn test_encrypt_decrypt_roundtrip() {
         let (ctx, sk) = make_ctx_and_key();
-        let mut rng = StdRng::seed_from_u64(123);
+        let mut rng = TenSafeRng::from_seed(123);
 
         let z: Vec<f64> = (0..10).map(|i| i as f64 * 0.5).collect();
         let ct = ctx.encrypt(&z, &sk, &mut rng);
@@ -582,7 +581,7 @@ mod tests {
     #[test]
     fn test_ct_pt_multiply() {
         let (ctx, sk) = make_ctx_and_key();
-        let mut rng = StdRng::seed_from_u64(456);
+        let mut rng = TenSafeRng::from_seed(456);
 
         // x = [1.0, 2.0, 3.0, 4.0, 5.0]
         let x: Vec<f64> = vec![1.0, 2.0, 3.0, 4.0, 5.0];
@@ -609,7 +608,7 @@ mod tests {
     #[test]
     fn test_ct_pt_mul_with_cached_ntt() {
         let (ctx, sk) = make_ctx_and_key();
-        let mut rng = StdRng::seed_from_u64(789);
+        let mut rng = TenSafeRng::from_seed(789);
 
         let x: Vec<f64> = (0..20).map(|i| (i as f64) * 0.1).collect();
         let p: Vec<f64> = (0..20).map(|i| 1.0 - (i as f64) * 0.04).collect();
@@ -637,7 +636,7 @@ mod tests {
     fn test_crt_overflow_validation() {
         // Test with larger plaintext values that stress the CRT reconstruction
         let (ctx, sk) = make_ctx_and_key();
-        let mut rng = StdRng::seed_from_u64(999);
+        let mut rng = TenSafeRng::from_seed(999);
 
         // Use values near the practical limit to stress CRT
         let x: Vec<f64> = (0..50).map(|i| (i as f64) * 10.0 - 250.0).collect();
@@ -663,7 +662,7 @@ mod tests {
     #[test]
     fn test_ct_add() {
         let (ctx, sk) = make_ctx_and_key();
-        let mut rng = StdRng::seed_from_u64(111);
+        let mut rng = TenSafeRng::from_seed(111);
 
         let a: Vec<f64> = (0..10).map(|i| i as f64 * 1.5).collect();
         let b: Vec<f64> = (0..10).map(|i| 10.0 - i as f64 * 0.3).collect();
@@ -688,7 +687,7 @@ mod tests {
     #[test]
     fn test_ct_sub() {
         let (ctx, sk) = make_ctx_and_key();
-        let mut rng = StdRng::seed_from_u64(222);
+        let mut rng = TenSafeRng::from_seed(222);
 
         let a: Vec<f64> = (0..10).map(|i| i as f64 * 2.0).collect();
         let b: Vec<f64> = (0..10).map(|i| i as f64 * 0.5).collect();
@@ -713,7 +712,7 @@ mod tests {
     #[test]
     fn test_pk_encrypt_decrypt_roundtrip() {
         let (ctx, sk) = make_ctx_and_key();
-        let mut rng = StdRng::seed_from_u64(333);
+        let mut rng = TenSafeRng::from_seed(333);
 
         let pk = ctx.keygen_public(&sk, &mut rng);
         let z: Vec<f64> = (0..10).map(|i| i as f64 * 0.5).collect();
@@ -735,7 +734,7 @@ mod tests {
     fn test_pk_encrypt_ct_pt_mul() {
         // Client encrypts with pk, server does ct×pt blind, client decrypts
         let (ctx, sk) = make_ctx_and_key();
-        let mut rng = StdRng::seed_from_u64(444);
+        let mut rng = TenSafeRng::from_seed(444);
 
         let pk = ctx.keygen_public(&sk, &mut rng);
 
@@ -765,7 +764,7 @@ mod tests {
     #[test]
     fn test_rescale() {
         let (ctx, sk) = make_ctx_and_key();
-        let mut rng = StdRng::seed_from_u64(555);
+        let mut rng = TenSafeRng::from_seed(555);
 
         let x: Vec<f64> = vec![1.0, 2.0, 3.0, 4.0, 5.0];
         let p: Vec<f64> = vec![0.5, 0.5, 0.5, 0.5, 0.5];

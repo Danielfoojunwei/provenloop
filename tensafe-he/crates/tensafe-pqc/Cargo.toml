@@ -1,0 +1,9 @@
+[package]
+name = "tensafe-pqc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Post-quantum cryptography (ML-KEM/Kyber, ML-DSA/Dilithium) using TenSafe-HE NTT infrastructure"
+
+[dependencies]
+tensafe-he-core = { path = "../tensafe-he-core" }

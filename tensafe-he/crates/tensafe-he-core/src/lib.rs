@@ -16,6 +16,7 @@
 pub mod params;
 pub mod rns;
 pub mod ntt;
+pub mod rng;
 pub mod sampling;
 pub mod encoding;
 pub mod ciphertext;

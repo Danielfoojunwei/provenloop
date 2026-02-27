@@ -30,14 +30,13 @@
 //!
 //! ```rust,no_run
 //! use tensafe_he_core::params::CkksParams;
+//! use tensafe_he_core::rng::TenSafeRng;
 //! use tensafe_he_cuda::context::GpuCkksContext;
-//! use rand::SeedableRng;
-//! use rand::rngs::StdRng;
 //!
 //! let params = CkksParams::n16384();
 //! let ctx = GpuCkksContext::new(params, 0).expect("CUDA init failed");
 //!
-//! let mut rng = StdRng::seed_from_u64(42);
+//! let mut rng = TenSafeRng::from_seed(42);
 //! let sk = ctx.keygen(&mut rng).unwrap();
 //!
 //! // Encrypt a vector

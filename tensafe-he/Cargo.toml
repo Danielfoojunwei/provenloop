@@ -4,6 +4,8 @@ members = [
     "crates/tensafe-he-core",
     "crates/tensafe-he-cpu",
     "crates/tensafe-he-cuda",
+    "crates/tensafe-he-python",
+    "crates/tensafe-pqc",
 ]
 
 [workspace.package]

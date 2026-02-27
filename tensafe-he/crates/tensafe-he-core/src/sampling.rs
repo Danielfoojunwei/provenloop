@@ -4,8 +4,7 @@
 //! - Error vectors: discrete Gaussian with σ ≈ 3.19
 //! - Random polynomials: uniform in Z_q
 
-use rand::Rng;
-use rand_distr::{Distribution, Normal};
+use crate::rng::TenSafeRng;
 
 /// Standard deviation for RLWE error distribution.
 pub const ERROR_STD_DEV: f64 = 3.19;
@@ -15,10 +14,10 @@ pub const ERROR_STD_DEV: f64 = 3.19;
 ///
 /// Returns coefficients in [0, q) representation:
 /// -1 is stored as q-1, 0 as 0, 1 as 1.
-pub fn sample_ternary<R: Rng>(rng: &mut R, n: usize, q: u64) -> Vec<u64> {
+pub fn sample_ternary(rng: &mut TenSafeRng, n: usize, q: u64) -> Vec<u64> {
     (0..n)
         .map(|_| {
-            let r = rng.random_range(0u32..3);
+            let r = rng.range_u32(3);
             match r {
                 0 => q - 1, // -1 mod q
                 1 => 0,
@@ -32,12 +31,10 @@ pub fn sample_ternary<R: Rng>(rng: &mut R, n: usize, q: u64) -> Vec<u64> {
 /// Sample a discrete Gaussian error vector with standard deviation σ.
 ///
 /// Returns coefficients in [0, q) representation (signed values mapped to mod q).
-pub fn sample_gaussian<R: Rng>(rng: &mut R, n: usize, q: u64, sigma: f64) -> Vec<u64> {
-    let normal = Normal::new(0.0, sigma).expect("Invalid sigma for Gaussian");
-
+pub fn sample_gaussian(rng: &mut TenSafeRng, n: usize, q: u64, sigma: f64) -> Vec<u64> {
     (0..n)
         .map(|_| {
-            let sample: f64 = normal.sample(rng);
+            let sample = rng.gaussian(sigma);
             let rounded = sample.round() as i64;
             if rounded >= 0 {
                 (rounded as u64) % q
@@ -51,11 +48,10 @@ pub fn sample_gaussian<R: Rng>(rng: &mut R, n: usize, q: u64, sigma: f64) -> Vec
 /// Sample a discrete Gaussian error vector as signed integers.
 /// Returns i64 values (not reduced mod q) — caller is responsible for RNS reduction.
 /// This ensures cross-limb consistency when stored in multiple RNS limbs.
-pub fn sample_gaussian_signed<R: Rng>(rng: &mut R, n: usize, sigma: f64) -> Vec<i64> {
-    let normal = Normal::new(0.0, sigma).expect("Invalid sigma for Gaussian");
+pub fn sample_gaussian_signed(rng: &mut TenSafeRng, n: usize, sigma: f64) -> Vec<i64> {
     (0..n)
         .map(|_| {
-            let sample: f64 = normal.sample(rng);
+            let sample = rng.gaussian(sigma);
             sample.round() as i64
         })
         .collect()
@@ -63,19 +59,18 @@ pub fn sample_gaussian_signed<R: Rng>(rng: &mut R, n: usize, sigma: f64) -> Vec<
 
 /// Sample a uniform random polynomial in Z_q^N.
 /// Used for the 'a' component in RLWE encryption.
-pub fn sample_uniform<R: Rng>(rng: &mut R, n: usize, q: u64) -> Vec<u64> {
-    (0..n).map(|_| rng.random_range(0..q)).collect()
+pub fn sample_uniform(rng: &mut TenSafeRng, n: usize, q: u64) -> Vec<u64> {
+    (0..n).map(|_| rng.range_u64(q)).collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rand::SeedableRng;
-    use rand::rngs::StdRng;
+    use crate::rng::TenSafeRng;
 
     #[test]
     fn test_ternary_distribution() {
-        let mut rng = StdRng::seed_from_u64(42);
+        let mut rng = TenSafeRng::from_seed(42);
         let q = 97u64;
         let n = 10000;
         let samples = sample_ternary(&mut rng, n, q);
@@ -109,7 +104,7 @@ mod tests {
 
     #[test]
     fn test_gaussian_distribution() {
-        let mut rng = StdRng::seed_from_u64(42);
+        let mut rng = TenSafeRng::from_seed(42);
         let q = 1099511627777u64; // 40-bit prime
         let n = 10000;
         let sigma = ERROR_STD_DEV;
@@ -145,7 +140,7 @@ mod tests {
 
     #[test]
     fn test_uniform_range() {
-        let mut rng = StdRng::seed_from_u64(42);
+        let mut rng = TenSafeRng::from_seed(42);
         let q = 97u64;
         let samples = sample_uniform(&mut rng, 1000, q);
         for &s in &samples {

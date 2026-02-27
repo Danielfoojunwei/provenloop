@@ -23,7 +23,7 @@ use crate::ntt::{GpuNttTables, StreamPool};
 use crate::poly::GpuRnsPoly;
 use crate::{launch_cfg, GpuResult};
 
-use rand::Rng;
+use tensafe_he_core::rng::TenSafeRng;
 
 /// GPU-resident CKKS ciphertext.
 pub struct GpuCiphertext {
@@ -109,7 +109,7 @@ impl GpuCkksContext {
     /// Generate a secret key.
     ///
     /// Ternary coefficients are sampled on CPU, then transformed to NTT domain on GPU.
-    pub fn keygen<R: Rng>(&self, rng: &mut R) -> GpuResult<GpuSecretKey> {
+    pub fn keygen(&self, rng: &mut TenSafeRng) -> GpuResult<GpuSecretKey> {
         let n = self.params.poly_degree;
         let num_limbs = self.params.num_limbs;
 
@@ -142,7 +142,7 @@ impl GpuCkksContext {
     }
 
     /// Generate a public key from the secret key (GPU-accelerated NTT).
-    pub fn keygen_public<R: Rng>(&self, sk: &GpuSecretKey, rng: &mut R) -> GpuResult<GpuPublicKey> {
+    pub fn keygen_public(&self, sk: &GpuSecretKey, rng: &mut TenSafeRng) -> GpuResult<GpuPublicKey> {
         let n = self.params.poly_degree;
         let num_limbs = self.params.num_limbs;
 
@@ -208,11 +208,11 @@ impl GpuCkksContext {
     ///   c1 = a               (NTT domain)
     ///
     /// Encoding + sampling on CPU, NTT + fused encrypt kernel on GPU.
-    pub fn encrypt<R: Rng>(
+    pub fn encrypt(
         &self,
         z: &[f64],
         sk: &GpuSecretKey,
-        rng: &mut R,
+        rng: &mut TenSafeRng,
     ) -> GpuResult<GpuCiphertext> {
         let n = self.params.poly_degree;
         let num_limbs = self.params.num_limbs;
@@ -289,11 +289,11 @@ impl GpuCkksContext {
     /// ct = (c0, c1) where:
     ///   u ← ternary, e0,e1 ← Gaussian
     ///   c0 = b·u + e0 + m,  c1 = a·u + e1
-    pub fn encrypt_pk<R: Rng>(
+    pub fn encrypt_pk(
         &self,
         z: &[f64],
         pk: &GpuPublicKey,
-        rng: &mut R,
+        rng: &mut TenSafeRng,
     ) -> GpuResult<GpuCiphertext> {
         let n = self.params.poly_degree;
         let num_limbs = self.params.num_limbs;
@@ -646,8 +646,7 @@ impl GpuCkksContext {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rand::SeedableRng;
-    use rand::rngs::StdRng;
+    use tensafe_he_core::rng::TenSafeRng;
 
     /// Helper: try to init GPU, skip test gracefully if no GPU available.
     /// cudarc panics (instead of returning Err) when the CUDA driver is missing,
@@ -673,7 +672,7 @@ mod tests {
     #[test]
     fn test_gpu_encrypt_decrypt_roundtrip() {
         let Some(ctx) = gpu_ctx() else { return };
-        let mut rng = StdRng::seed_from_u64(42);
+        let mut rng = TenSafeRng::from_seed(42);
         let sk = ctx.keygen(&mut rng).unwrap();
 
         let x: Vec<f64> = vec![1.0, 2.0, 3.0, 4.0, 5.0];
@@ -694,7 +693,7 @@ mod tests {
     #[test]
     fn test_gpu_ct_pt_multiply() {
         let Some(ctx) = gpu_ctx() else { return };
-        let mut rng = StdRng::seed_from_u64(42);
+        let mut rng = TenSafeRng::from_seed(42);
         let sk = ctx.keygen(&mut rng).unwrap();
 
         let x: Vec<f64> = vec![1.0, 2.0, 3.0, 4.0, 5.0];
@@ -719,7 +718,7 @@ mod tests {
     #[test]
     fn test_gpu_cached_ntt_multiply() {
         let Some(ctx) = gpu_ctx() else { return };
-        let mut rng = StdRng::seed_from_u64(42);
+        let mut rng = TenSafeRng::from_seed(42);
         let sk = ctx.keygen(&mut rng).unwrap();
 
         let x: Vec<f64> = (0..20).map(|i| (i as f64) * 0.1).collect();

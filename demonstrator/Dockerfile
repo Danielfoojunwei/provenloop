@@ -19,6 +19,7 @@ FROM ubuntu:22.04 AS rust-builder
 # Ubuntu 22.04 defaults to Python 3.10; maturin wheels target the build Python.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl build-essential software-properties-common pkg-config \
+    gnupg ca-certificates \
     && add-apt-repository -y ppa:deadsnakes/ppa \
     && apt-get update \
     && apt-get install -y --no-install-recommends python3.11 python3.11-dev python3-pip \
@@ -44,7 +45,7 @@ RUN cd /build/tensafe-he/crates/tensafe-he-python \
 FROM nvidia/cuda:12.1.0-devel-ubuntu22.04
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    software-properties-common \
+    software-properties-common gnupg ca-certificates \
     && add-apt-repository -y ppa:deadsnakes/ppa \
     && apt-get update \
     && apt-get install -y --no-install-recommends \

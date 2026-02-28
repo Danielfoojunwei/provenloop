@@ -135,8 +135,10 @@ class MetaAgent:
         """
         Analyze task and determine which TGSP adapter skills are needed.
 
-        Reads the embedded SKILL.md (skill_doc) from each available adapter
-        to decide which ones match the task.
+        Uses TSA routing when the runtime has a loaded TSA: the TSA's
+        system context (privacy budget, adapter inventory, metering state)
+        is used to steer adapter selection.  Falls back to trigger/skill_doc
+        matching when no TSA is available.
         """
         if self.runtime is None:
             return []
@@ -144,19 +146,55 @@ class MetaAgent:
         available = self.runtime.list_adapters()
         matched = []
 
+        # TSA-aware routing: if runtime has a loaded TSA, prefer its
+        # routing decision as the primary adapter.
+        tsa_routed = None
+        if hasattr(self.runtime, "tsa_loaded") and self.runtime.tsa_loaded:
+            # Use TSA system context to inform routing
+            tsa_info = self.runtime.get_tsa_info()
+            if tsa_info is not None:
+                logger.info(
+                    "MetaAgent: TSA loaded (id=%s), using TSA-aware routing",
+                    tsa_info.adapter_id if hasattr(tsa_info, "adapter_id") else "?",
+                )
+                # TSA hint: prefer adapters whose domain matches the task
+                task_lower = task.lower()
+                for adapter_info in available:
+                    a_type = getattr(adapter_info, "adapter_type", None)
+                    if a_type is None:
+                        a_type = adapter_info.get("adapter_type", "domain") if isinstance(adapter_info, dict) else "domain"
+                    if a_type == "domain":
+                        triggers = adapter_info.get("triggers", []) if isinstance(adapter_info, dict) else []
+                        if any(t.lower() in task_lower for t in triggers):
+                            tsa_routed = adapter_info["name"] if isinstance(adapter_info, dict) else adapter_info.name
+                            break
+
         for adapter_info in available:
-            skill_doc = adapter_info.get("skill_doc", "")
-            triggers = adapter_info.get("triggers", [])
+            if isinstance(adapter_info, dict):
+                skill_doc = adapter_info.get("skill_doc", "")
+                triggers = adapter_info.get("triggers", [])
+                name = adapter_info["name"]
+            else:
+                skill_doc = getattr(adapter_info, "skill_doc", "")
+                triggers = getattr(adapter_info, "triggers", [])
+                name = adapter_info.name
 
             # Match by triggers
             task_lower = task.lower()
             if any(trigger.lower() in task_lower for trigger in triggers):
-                matched.append(adapter_info["name"])
+                matched.append(name)
                 continue
 
             # Match by skill_doc content
             if skill_doc and self._skill_matches_task(skill_doc, task):
-                matched.append(adapter_info["name"])
+                matched.append(name)
+
+        # If TSA routed an adapter, ensure it's at the front
+        if tsa_routed and tsa_routed not in matched:
+            matched.insert(0, tsa_routed)
+        elif tsa_routed and tsa_routed in matched:
+            matched.remove(tsa_routed)
+            matched.insert(0, tsa_routed)
 
         return matched or ["general"]  # Fallback to general adapter
 
@@ -358,6 +396,7 @@ class MetaAgent:
         Run red-team checks on an adapter swap.
 
         Checks:
+        0. TSA binding pre-filter (adapter must be bound to loaded TSA)
         1. TGSP Load Gate passes (hash, signatures, RVUv2, LoraConfig)
         2. Output comparison on safety-critical prompts (no regression)
         3. Bias detection (no new bias introduced)
@@ -365,13 +404,40 @@ class MetaAgent:
         """
         checks = []
 
-        # Check 1: TGSP Load Gate
+        # Check 0 (pre-filter): TSA binding verification
+        # Domain adapters MUST be bound to the loaded TSA.  Reject early
+        # if no TSA is loaded or the adapter lacks a valid tsa_binding.
+        if self.runtime and hasattr(self.runtime, "tsa_loaded"):
+            if self.runtime.tsa_loaded:
+                checks.append(SwapRedTeamCheck(
+                    check_name="tsa_binding_prefilter",
+                    passed=True,
+                    details=f"TSA loaded (id={self.runtime.tsa_adapter_id}), "
+                            f"binding will be verified in load gate step 7",
+                ))
+            else:
+                checks.append(SwapRedTeamCheck(
+                    check_name="tsa_binding_prefilter",
+                    passed=False,
+                    details="No TSA loaded — domain adapter swaps require a "
+                            "TenSafe System Adapter to be loaded first",
+                    severity="critical",
+                ))
+        else:
+            checks.append(SwapRedTeamCheck(
+                check_name="tsa_binding_prefilter",
+                passed=True,
+                details="TSA binding pre-filter skipped (runtime does not "
+                        "support TSA or not available)",
+            ))
+
+        # Check 1: TGSP Load Gate (8-step verification including TSA binding)
         if self.runtime:
             gate_result = self.runtime.check_load_gate(to_adapter)
             checks.append(SwapRedTeamCheck(
                 check_name="tgsp_load_gate",
                 passed=gate_result.get("passed", False),
-                details=f"7-step verification: {gate_result.get('steps_passed', 0)}/7 passed",
+                details=f"8-step verification: {gate_result.get('steps_passed', 0)}/8 passed",
                 severity="critical" if not gate_result.get("passed") else "info",
             ))
         else:

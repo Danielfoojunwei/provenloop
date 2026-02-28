@@ -881,10 +881,14 @@ async def split_selftest(query: str = "What is a savings account?"):
                 # Send through split_forward (same as POST /api/v1/split/forward)
                 result = engine.split_forward(
                     hidden_states_np=flat,
-                    expert_name=engine.route_expert(query),
+                    expert_name=engine.tsa_route(
+                        query,
+                        system_context=engine.get_system_context(session_id),
+                    ),
                     use_he=True,
                     session_id=session_id,
                     incremental=incremental,
+                    query=query,
                 )
 
                 # Prefer server-side top-256 logits (GPU, ~5ms) over

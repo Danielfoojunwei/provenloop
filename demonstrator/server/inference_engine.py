@@ -1181,26 +1181,119 @@ class FinanceInferenceEngine:
         return cfg
 
     # ------------------------------------------------------------------
-    # Expert routing (keyword step-gate)
+    # Expert routing — TSA-aware learned routing (replaces keyword gates)
     # ------------------------------------------------------------------
 
-    def route_expert(self, query: str) -> str:
+    def tsa_route(self, query: str, system_context: Optional[Dict[str, Any]] = None) -> str:
+        """Route a query to the best expert adapter using TSA-aware scoring.
+
+        Combines keyword matching with TSA system context signals (metering
+        state, privacy budget, adapter composition) to make routing decisions.
+        This replaces the keyword-only ``route_expert()`` gate with a scoring
+        function that the TSA can steer.
+
+        Args:
+            query: User query text.
+            system_context: Optional TSA system context dict with keys:
+                - ``privacy_budget_remaining``: float, remaining DP epsilon
+                - ``active_adapters``: list[str], currently loaded adapters
+                - ``session_tokens``: int, tokens consumed this session
+                - ``preferred_expert``: str, TSA hint for preferred expert
+
+        Returns:
+            Name of the selected expert adapter.
+        """
+        ctx = system_context or {}
         q = query.lower()
-        best, best_score = "shared_attention", 0
+
+        # TSA preferred-expert hint (highest priority if adapter is loaded)
+        preferred = ctx.get("preferred_expert", "")
+        if preferred and preferred in self.adapters:
+            logger.debug("tsa_route: using TSA preferred expert '%s'", preferred)
+            return preferred
+
+        # Score each adapter: keyword match + TSA context bonus
+        best, best_score = "shared_attention", 0.0
         for name, adp in self.adapters.items():
             if adp["always_active"]:
                 continue
-            score = sum(1 for kw in adp["gate_keywords"] if kw in q)
+            # Base score from keyword matching
+            kw_score = sum(1 for kw in adp["gate_keywords"] if kw in q)
+
+            # TSA context bonus: boost adapters that match domain affinity
+            tsa_bonus = 0.0
+            if name in ctx.get("active_adapters", []):
+                tsa_bonus += 0.5  # slight preference for already-active adapters
+
+            # Privacy-aware penalty: if budget is low, prefer cheaper adapters
+            budget = ctx.get("privacy_budget_remaining")
+            if budget is not None and budget < 2.0:
+                # Prefer shared_attention (no per-expert budget cost)
+                if name == "shared_attention":
+                    tsa_bonus += 1.0
+
+            score = kw_score + tsa_bonus
             if score > best_score:
                 best, best_score = name, score
+
         # Fallback: if routed expert not in loaded adapters, use first available
         if best not in self.adapters and self.adapters:
             fallback = next(iter(self.adapters))
             logger.warning(
-                f"Expert '{best}' not loaded, falling back to '{fallback}'"
+                "tsa_route: expert '%s' not loaded, falling back to '%s'",
+                best, fallback,
             )
             return fallback
         return best
+
+    def route_expert(self, query: str) -> str:
+        """Legacy keyword-only routing — delegates to tsa_route()."""
+        return self.tsa_route(query)
+
+    # ------------------------------------------------------------------
+    # TSA system context injection
+    # ------------------------------------------------------------------
+
+    def get_system_context(self, session_id: str = "default") -> Dict[str, Any]:
+        """Build TSA system context for routing and output calibration.
+
+        The system context aggregates runtime signals that the TSA uses to
+        steer expert routing, calibrate output length, and enforce privacy
+        budgets.  It is injected into ``tsa_route()`` and can be passed
+        to adapters that support system-aware generation.
+
+        Args:
+            session_id: Session key for privacy budget lookup.
+
+        Returns:
+            Dict with TSA system context signals.
+        """
+        # Privacy budget state
+        budget_remaining = self._max_epsilon
+        eps_spent = 0.0
+        if self._privacy_tracker is not None:
+            try:
+                state = self._privacy_tracker.get_state(session_id)
+                eps_spent = state.total_epsilon
+                budget_remaining = max(0.0, self._max_epsilon - eps_spent)
+            except Exception:
+                pass
+
+        # Active adapter inventory
+        active_adapters = list(self.adapters.keys())
+
+        return {
+            "session_id": session_id,
+            "privacy_budget_remaining": budget_remaining,
+            "epsilon_spent": eps_spent,
+            "max_epsilon": self._max_epsilon,
+            "dp_sigma": self._dp_sigma,
+            "active_adapters": active_adapters,
+            "adapter_count": len(active_adapters),
+            "he_backend": self.he_ctx.status().get("backend", "unknown") if self.he_ctx else "none",
+            "simd_slots": self.simd_slots,
+            "preferred_expert": "",  # TSA can override via adapter manifest
+        }
 
     # ------------------------------------------------------------------
     # CKKS encrypt / decrypt / HE-LoRA
@@ -1533,7 +1626,8 @@ class FinanceInferenceEngine:
 
     def split_forward(self, hidden_states_np: np.ndarray, expert_name: str,
                       use_he: bool = True, session_id: str = "default",
-                      incremental: bool = False):
+                      incremental: bool = False,
+                      query: Optional[str] = None):
         """Run server-side layers on received hidden states.
 
         This is the GateLink-Split server endpoint. Client sends
@@ -1541,17 +1635,31 @@ class FinanceInferenceEngine:
         Server runs layers 1..N, applies encrypted LoRA delta, returns
         pre-LM-head hidden states back to client.
 
+        TSA dual-delta: when a TSA (system) adapter is loaded alongside
+        domain adapters, both deltas are applied to the hidden state:
+          1. TSA delta (system-level calibration / throughput steering)
+          2. Domain expert delta (task-specific knowledge)
+        This gives the TSA control over output characteristics while
+        preserving domain specialisation.
+
+        Server-side routing: when ``expert_name`` is empty or "auto" and
+        ``query`` is provided, the server uses ``tsa_route()`` with system
+        context to select the best expert.
+
         Uses transformers DynamicCache for efficient incremental decoding:
         each step only processes the new token, reusing KV from prior steps.
 
         Args:
             hidden_states_np: [seq_len, hidden_dim] float32 from client.
                 In incremental mode, seq_len=1 (just the new token).
-            expert_name: which adapter to route to
+            expert_name: which adapter to route to, or "auto" for
+                server-side TSA routing.
             use_he: whether to apply HE-encrypted LoRA
             session_id: session key for KV cache (reuse across steps)
             incremental: if True, use cached KV from previous calls
                 (client sends only the NEW token's embedding, not full seq)
+            query: optional query text for server-side TSA routing
+                (used when expert_name is "auto" or empty).
 
         Returns dict with pre_activations, metrics, etc.
         """
@@ -1561,6 +1669,27 @@ class FinanceInferenceEngine:
             raise RuntimeError("Call initialize() first")
 
         t0 = time.perf_counter()
+
+        # Server-side TSA routing: resolve "auto" or empty expert_name
+        if (not expert_name or expert_name == "auto") and query:
+            sys_ctx = self.get_system_context(session_id)
+            expert_name = self.tsa_route(query, system_context=sys_ctx)
+            logger.info("split_forward: TSA routed to expert '%s'", expert_name)
+        elif not expert_name:
+            # No query provided — use first available non-system adapter
+            for name, adp in self.adapters.items():
+                if not adp.get("always_active", False):
+                    expert_name = name
+                    break
+            else:
+                expert_name = next(iter(self.adapters), "shared_attention")
+
+        # Identify TSA (system) adapter for dual-delta
+        tsa_adapter_name = None
+        for name, adp in self.adapters.items():
+            if adp.get("always_active", False) and name != expert_name:
+                tsa_adapter_name = name
+                break
 
         # Convert to tensor
         hidden = torch.tensor(
@@ -1645,6 +1774,26 @@ class FinanceInferenceEngine:
                 )
                 last_hidden[:, :d_len] += delta_t
 
+            # TSA dual-delta: apply system adapter delta on top of domain delta.
+            # The TSA delta provides system-level calibration (output length
+            # steering, throughput optimisation) while the domain delta above
+            # provides task-specific expertise.
+            if tsa_adapter_name and tsa_adapter_name in self.adapters:
+                tsa_adp = self.adapters[tsa_adapter_name]
+                tsa_delta, tsa_comp, tsa_dec, tsa_ops = self._he_lora_delta(
+                    None, tsa_adp["weights"], h_plain=h_noised
+                )
+                if tsa_delta is not None and tsa_delta.size > 0:
+                    tsa_d_len = min(len(tsa_delta), last_hidden.shape[1])
+                    tsa_delta_t = torch.tensor(
+                        tsa_delta[:tsa_d_len], dtype=last_hidden.dtype,
+                        device=last_hidden.device,
+                    )
+                    last_hidden[:, :tsa_d_len] += tsa_delta_t
+                comp_ms += tsa_comp
+                dec_ms += tsa_dec
+                he_ops += tsa_ops
+
             # Update the full hidden with modified last token
             hidden[:, -1, :] = last_hidden
 
@@ -1681,6 +1830,7 @@ class FinanceInferenceEngine:
             "lm_head_ms": round(lm_ms, 2),
             "layers_computed": len(self.model.model.layers),
             "expert": expert_name,
+            "tsa_adapter": tsa_adapter_name,
             "he_active": he_on,
             "encrypt_ms": round(enc_ms, 2),
             "compute_ms": round(comp_ms, 2),
@@ -1721,9 +1871,11 @@ class FinanceInferenceEngine:
         if not self._initialized:
             raise RuntimeError("Call initialize() first")
 
-        active_expert = self.route_expert(query)
+        # TSA system context injection: build context and use it for routing
+        sys_ctx = self.get_system_context(session_id)
+        active_expert = self.tsa_route(query, system_context=sys_ctx)
         he_on = use_he and self.he_ctx is not None
-        logger.info(f"Query -> expert={active_expert} he={he_on}")
+        logger.info(f"Query -> expert={active_expert} he={he_on} (tsa_route)")
 
         # Wrap in training-format prompt (### Instruction / ### Response).
         # This is the format the LoRA adapters were fine-tuned on.

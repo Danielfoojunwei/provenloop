@@ -73,7 +73,7 @@ def train_rl(
     sft_dir: str,
     output_dir: str,
     rl_steps: int = 500,
-    rank: int = 32,
+    rank: int = 30,
     alpha: float = 64.0,
     skip_completed: bool = True,
 ) -> dict:

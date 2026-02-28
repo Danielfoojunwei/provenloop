@@ -25,7 +25,7 @@ except ImportError as e:
 
 # Constants
 MODEL_ID = "Qwen/Qwen1.5-MoE-A2.7B"
-RANK = 32
+RANK = 30
 ALPHA = 8  # User's k=8
 DEVICE = "cuda"
 

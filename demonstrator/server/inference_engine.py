@@ -939,7 +939,7 @@ class FinanceInferenceEngine:
         # 5. Build adapter config from manifest + overrides
         ecfg = {
             "adapter_id": manifest.get("adapter_id", ""),
-            "rank": manifest.get("rank", 32),
+            "rank": manifest.get("rank", 30),
             "alpha": manifest.get("alpha", 64),
             "format_version": manifest.get("format_version", "1.0"),
             "license": manifest.get("license", "unknown"),

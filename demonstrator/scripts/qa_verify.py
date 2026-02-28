@@ -95,7 +95,7 @@ def test_moe_config_gatelink():
         gl.get("device_profile") == "phone"
         and gl.get("client_layers") == 1
         and gl.get("dp_epsilon") == 1.0
-        and gl.get("max_lora_rank") == 32
+        and gl.get("max_lora_rank") == 30
         and "force_he_in_split_mode" in gl
     )
 

@@ -25,7 +25,7 @@ BASE = Path(__file__).resolve().parents[1]  # demonstrator/
 ADAPTERS = BASE / "adapters"
 TGSP_DIR = ADAPTERS / "tgsp"
 
-RANK = 32
+RANK = 30
 HIDDEN_DIM = 1536  # Qwen 2.5-1.5B hidden size
 ALPHA = 64.0
 

@@ -171,7 +171,7 @@ def train_adapter(
     batch_size: int = 1,
     grad_accum: int = 8,
     learning_rate: float = 1e-4,
-    rank: int = 32,
+    rank: int = 30,
     alpha: float = 64.0,
     max_seq_length: int = 512,
     skip_completed: bool = True,

@@ -1103,7 +1103,7 @@ async def metrics():
         "gatelink": {
             "client_layers": 1,
             "dp_epsilon": engine._dp_epsilon if engine else 1.0,
-            "max_lora_rank": 32,
+            "max_lora_rank": 30,
             "split_forward_endpoint": "/api/v1/split/forward",
         },
         "differential_privacy": dp_info,

@@ -2,16 +2,30 @@
 Self-improvement loop engine for TenSafe agents.
 
 Agents that detect quality degradation can trigger a self-improvement
-cycle: analyze gaps → train improved adapter → red-team the swap →
+cycle: analyze gaps -> train improved adapter -> red-team the swap ->
 deploy if approved.
 
-All self-improvement generates metered inference (training is 100-1000×
+All self-improvement generates metered inference (training is 100-1000x
 more tokens than inference), creating the revenue flywheel.
+
+Components:
+    SelfImprovementEngine: Original cycle-based improvement pipeline.
+    SelfImproveLoop:       Continuous background loop with A/B testing.
+    QualityEvaluator:      Heuristic quality scoring for responses.
+    QualityMetrics:        Per-adapter quality statistics.
 """
 
+from __future__ import annotations
+
+import asyncio
+import enum
 import logging
+import statistics
+import time
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from typing import Any, Callable, Dict, List, Optional, Sequence
 
 logger = logging.getLogger(__name__)
 

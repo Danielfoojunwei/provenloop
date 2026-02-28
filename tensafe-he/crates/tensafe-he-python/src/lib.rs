@@ -133,6 +133,7 @@ impl CkksContext {
         Ok(TenSafeCiphertext {
             inner: ct,
             num_slots: self.num_slots,
+            params: self.ctx.params.clone(),
             cached_ctx: None,
         })
     }
@@ -159,6 +160,7 @@ impl CkksContext {
         Ok(TenSafeCiphertext {
             inner: ct,
             num_slots: self.num_slots,
+            params: self.ctx.params.clone(),
             cached_ctx: None,
         })
     }
@@ -190,6 +192,7 @@ impl CkksContext {
         Ok(TenSafeCiphertext {
             inner: result,
             num_slots: self.num_slots,
+            params: self.ctx.params.clone(),
             cached_ctx: None,
         })
     }
@@ -200,6 +203,7 @@ impl CkksContext {
         TenSafeCiphertext {
             inner: result,
             num_slots: self.num_slots,
+            params: self.ctx.params.clone(),
             cached_ctx: None,
         }
     }
@@ -210,6 +214,7 @@ impl CkksContext {
         TenSafeCiphertext {
             inner: result,
             num_slots: self.num_slots,
+            params: self.ctx.params.clone(),
             cached_ctx: None,
         }
     }
@@ -220,6 +225,7 @@ impl CkksContext {
         TenSafeCiphertext {
             inner: result,
             num_slots: self.num_slots,
+            params: self.ctx.params.clone(),
             cached_ctx: None,
         }
     }
@@ -251,6 +257,7 @@ impl CkksContext {
             results.push(TenSafeCiphertext {
                 inner: ct,
                 num_slots: self.num_slots,
+                params: self.ctx.params.clone(),
                 cached_ctx: None,
             });
         }
@@ -311,6 +318,10 @@ struct TenSafePublicKey {
 struct TenSafeCiphertext {
     inner: Ciphertext,
     num_slots: usize,
+    /// The actual CKKS parameters used to create this ciphertext.
+    /// Stored at encryption time so that operator overloading uses the correct
+    /// parameters even for custom parameter sets (different primes, scale, etc.).
+    params: CkksParams,
     /// Cached context for operator overloading (avoids re-creating per __mul__ call).
     /// Lazily initialized on first use.
     cached_ctx: Option<CoreContext>,
@@ -319,11 +330,10 @@ struct TenSafeCiphertext {
 impl TenSafeCiphertext {
     /// Get or create a CoreContext for this ciphertext's parameters.
     /// Uses cached version if available, otherwise creates and caches a new one.
+    /// Uses the actual params stored at encryption time, not inferred from poly_degree.
     fn ensure_ctx(&mut self) {
         if self.cached_ctx.is_none() {
-            let poly_degree = self.inner.c0.limbs[0].len();
-            let params = CkksParams::for_degree(poly_degree);
-            self.cached_ctx = Some(CoreContext::new(params));
+            self.cached_ctx = Some(CoreContext::new(self.params.clone()));
         }
     }
 }
@@ -351,6 +361,7 @@ impl TenSafeCiphertext {
         Ok(TenSafeCiphertext {
             inner: result,
             num_slots,
+            params: self.params.clone(),
             cached_ctx: None,
         })
     }
@@ -364,6 +375,7 @@ impl TenSafeCiphertext {
         TenSafeCiphertext {
             inner: result,
             num_slots,
+            params: self.params.clone(),
             cached_ctx: None,
         }
     }
@@ -377,6 +389,7 @@ impl TenSafeCiphertext {
         TenSafeCiphertext {
             inner: result,
             num_slots,
+            params: self.params.clone(),
             cached_ctx: None,
         }
     }

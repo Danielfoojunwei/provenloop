@@ -5,7 +5,7 @@ set -euo pipefail
 
 echo "============================================================"
 echo "  TenSafe Finance Demonstrator - Training Pipeline (WSL)"
-echo "  Model: Qwen/Qwen2.5-1.5B | Rank: 32 | Alpha: 64.0"
+echo "  Model: Qwen/Qwen2.5-1.5B | Rank: 30 | Alpha: 64.0"
 echo "  Crash-resilient: per-adapter processes, auto-resume."
 echo "============================================================"
 echo ""
@@ -24,7 +24,7 @@ cd "$ROOT_DIR"
 SFT_ARGS=(
     --output-dir "${PROJECT_DIR}/adapters"
     --max-steps 2000
-    --rank 32
+    --rank 30
     --alpha 64.0
     --batch-size 1
     --grad-accum 8
@@ -57,7 +57,7 @@ for adapter in banking_expert investment_expert shared_attention; do
         --sft-dir "${PROJECT_DIR}/adapters" \
         --output-dir "${PROJECT_DIR}/adapters" \
         --rl-steps 500 \
-        --rank 32 \
+        --rank 30 \
         --alpha 64.0 \
     || {
         echo "!!! ${adapter} RL failed (exit $?). Re-run to resume."

@@ -42,7 +42,7 @@ def _extract_lora_to_peft_dir(full_state_path: Path, peft_dir: Path) -> bool:
         state_bytes = f.read()
 
     buffer = io.BytesIO(state_bytes)
-    state = torch.load(buffer, map_location="cpu", weights_only=False)
+    state = torch.load(buffer, map_location="cpu", weights_only=True)
     del state_bytes  # free memory
 
     model_state = state.get("model_state_dict", {})
@@ -78,7 +78,7 @@ def _extract_lora_to_peft_dir(full_state_path: Path, peft_dir: Path) -> bool:
         "peft_type": "LORA",
         "base_model_name_or_path": "Qwen/Qwen2.5-1.5B",
         "r": rank,
-        "lora_alpha": rank * 2,
+        "lora_alpha": 64,  # M6: use explicit alpha (rank*2 gave 60 for rank=30)
         "target_modules": sorted(target_modules),
         "lora_dropout": 0.0,
         "bias": "none",

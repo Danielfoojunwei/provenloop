@@ -55,9 +55,22 @@ app = FastAPI(
     docs_url="/docs" if os.getenv("TG_ENVIRONMENT") != "production" else None,
 )
 
+# M4: Use consistent env var name with TENSAFE_ prefix
 CORS_ORIGINS = os.getenv(
-    "CORS_ORIGINS", "*"  # Allow all origins: phone accesses via LAN IP (e.g. 192.168.x.x:9090)
+    "TENSAFE_CORS_ORIGINS",
+    os.getenv("CORS_ORIGINS", "http://localhost:8000,http://localhost:9095"),
 ).split(",")
+
+# H4/M5: API key for admin endpoints (adapter swap, privacy reset)
+_ADMIN_API_KEY = os.getenv("TENSAFE_ADMIN_API_KEY", "")
+
+
+def _check_admin_auth(request: Request) -> bool:
+    """Check admin API key for sensitive endpoints."""
+    if not _ADMIN_API_KEY:
+        return True  # No key configured = allow (dev mode)
+    auth = request.headers.get("Authorization", "")
+    return auth == f"Bearer {_ADMIN_API_KEY}"
 
 app.add_middleware(
     CORSMiddleware,
@@ -106,6 +119,11 @@ def _check_rate_limit(client_ip: str) -> bool:
     if len(_rate_buckets[client_ip]) >= _RATE_MAX:
         return False
     _rate_buckets[client_ip].append(now)
+    # L14: Prune stale IPs to prevent unbounded memory growth
+    if len(_rate_buckets) > 10000:
+        stale = [ip for ip, ts in _rate_buckets.items() if not ts or now - ts[-1] > _RATE_WINDOW]
+        for ip in stale:
+            del _rate_buckets[ip]
     return True
 
 
@@ -586,7 +604,7 @@ async def split_config():
         "simd_slots": engine.simd_slots if engine else 0,
         "he_active": engine.he_ctx is not None if engine else False,
         "lora_rank": _get_effective_lora_rank(engine),
-        "target_lora_rank": glc.get("target_lora_rank", 32),
+        "target_lora_rank": glc.get("target_lora_rank", 30),
     }
 
 
@@ -1001,12 +1019,15 @@ async def list_adapters():
 
 
 @app.post("/api/v1/adapters/{expert_name}/swap")
-async def swap_adapter(expert_name: str, tgsp_file: UploadFile):
+async def swap_adapter(expert_name: str, tgsp_file: UploadFile, request: Request):
     """Hot-swap a TGSP adapter without restarting the engine.
 
     Upload a .tgsp file and the engine will parse, validate, and
     atomically replace the named adapter slot.
+    Requires TENSAFE_ADMIN_API_KEY if configured.
     """
+    if not _check_admin_auth(request):
+        return JSONResponse(status_code=403, content={"error": "Admin API key required"})
     if not engine or not engine._initialized:
         return JSONResponse(
             status_code=503,
@@ -1132,7 +1153,10 @@ def _get_request_stats() -> dict:
 
 @app.post("/api/v1/privacy/reset")
 async def reset_privacy_budget(request: Request):
-    """Reset the DP privacy budget so the demo can continue."""
+    """Reset the DP privacy budget so the demo can continue.
+    Requires TENSAFE_ADMIN_API_KEY if configured."""
+    if not _check_admin_auth(request):
+        return JSONResponse(status_code=403, content={"error": "Admin API key required"})
     client_ip = request.client.host if request.client else "unknown"
     if engine and engine._privacy_tracker:
         # Clear session state

@@ -15,8 +15,14 @@
 # ======================================================================
 FROM ubuntu:22.04 AS rust-builder
 
+# H7: Install Python 3.11 in builder to match runtime stage (cp311 wheels).
+# Ubuntu 22.04 defaults to Python 3.10; maturin wheels target the build Python.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl build-essential python3-dev python3-pip pkg-config \
+    curl build-essential software-properties-common pkg-config \
+    && add-apt-repository -y ppa:deadsnakes/ppa \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends python3.11 python3.11-dev python3-pip \
+    && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1 \
     && rm -rf /var/lib/apt/lists/*
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.80.0
 ENV PATH="/root/.cargo/bin:${PATH}"
@@ -67,6 +73,11 @@ RUN --mount=type=bind,source=.,target=/build_ctx \
 
 # ---- Adapter storage ----
 RUN mkdir -p /app/demonstrator/adapters/tgsp /app/demonstrator/checkpoints
+
+# ---- L10: Non-root user for production security ----
+RUN groupadd -r tensafe && useradd -r -g tensafe -d /app tensafe \
+    && chown -R tensafe:tensafe /app
+USER tensafe
 
 # ---- Environment ----
 ENV PYTHONPATH=/app

@@ -9,6 +9,7 @@ where delta' = delta / (2T).
 """
 
 import math
+import threading
 from dataclasses import dataclass, field
 
 
@@ -23,6 +24,10 @@ class PrivacyState:
 class PrivacyBudgetTracker:
     """Track differential privacy budget across sessions.
 
+    Thread-safe: uses a lock to protect concurrent read-modify-write
+    on per-session state (multiple async requests may call consume()
+    concurrently for the same session).
+
     Args:
         max_epsilon: Maximum cumulative epsilon before refusing queries.
         delta: DP delta parameter (probability of privacy breach).
@@ -32,6 +37,7 @@ class PrivacyBudgetTracker:
         self.max_epsilon = max_epsilon
         self.delta = delta
         self._states: dict[str, PrivacyState] = {}
+        self._lock = threading.Lock()
 
     def _advanced_composition(self, per_query_eps: float, num_queries: int) -> float:
         """Advanced composition theorem for (eps, delta)-DP."""
@@ -50,19 +56,21 @@ class PrivacyBudgetTracker:
         Returns:
             (budget_ok, state): budget_ok is True if within budget.
         """
-        state = self._states.setdefault(session_id, PrivacyState())
+        with self._lock:
+            state = self._states.setdefault(session_id, PrivacyState())
 
-        # Compute what epsilon_total would be after this query
-        projected = self._advanced_composition(epsilon, state.total_requests + 1)
+            # Compute what epsilon_total would be after this query
+            projected = self._advanced_composition(epsilon, state.total_requests + 1)
 
-        if projected > self.max_epsilon:
-            state.budget_exhausted = True
-            return False, state
+            if projected > self.max_epsilon:
+                state.budget_exhausted = True
+                return False, state
 
-        state.total_requests += 1
-        state.total_epsilon = projected
-        return True, state
+            state.total_requests += 1
+            state.total_epsilon = projected
+            return True, state
 
     def get_state(self, session_id: str = "default") -> PrivacyState:
         """Get current privacy state for a session."""
-        return self._states.get(session_id, PrivacyState())
+        with self._lock:
+            return self._states.get(session_id, PrivacyState())

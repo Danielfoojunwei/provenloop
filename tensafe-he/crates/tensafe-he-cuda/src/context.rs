@@ -192,6 +192,7 @@ impl GpuCkksContext {
                         &e_gpu.limbs[l],
                         self.params.moduli[l].value,
                         self.params.moduli[l].barrett_hi,
+                        self.params.moduli[l].barrett_lo,
                         n as u32,
                     ),
                 )?;
@@ -271,6 +272,7 @@ impl GpuCkksContext {
                         &e_gpu.limbs[l],
                         self.params.moduli[l].value,
                         self.params.moduli[l].barrett_hi,
+                        self.params.moduli[l].barrett_lo,
                         n as u32,
                     ),
                 )?;
@@ -383,6 +385,7 @@ impl GpuCkksContext {
                         &sk.s_ntt.limbs[l],
                         self.params.moduli[l].value,
                         self.params.moduli[l].barrett_hi,
+                        self.params.moduli[l].barrett_lo,
                         n as u32,
                     ),
                 )?;
@@ -509,6 +512,7 @@ impl GpuCkksContext {
                         &sk.s_ntt.limbs[l],
                         self.params.moduli[l].value,
                         self.params.moduli[l].barrett_hi,
+                        self.params.moduli[l].barrett_lo,
                         n as u32,
                     ),
                 )?;

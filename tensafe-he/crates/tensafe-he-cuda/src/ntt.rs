@@ -47,8 +47,10 @@ pub struct GpuNttTables {
     pub n_inv: u64,
     /// The modulus q.
     pub q: u64,
-    /// Barrett constant for this modulus.
+    /// Barrett constant high word: floor(2^128 / q) >> 64.
     pub barrett_hi: u64,
+    /// Barrett constant low word: floor(2^128 / q) & ((1<<64)-1).
+    pub barrett_lo: u64,
     /// log₂(N).
     pub log_n: u32,
     /// Polynomial degree N.
@@ -79,6 +81,7 @@ impl GpuNttTables {
             n_inv: cpu_tables.n_inv,
             q,
             barrett_hi: modulus.barrett_hi,
+            barrett_lo: modulus.barrett_lo,
             log_n: cpu_tables.log_n,
             n,
         };
@@ -155,6 +158,7 @@ impl GpuNttTables {
                         &self.forward_twiddles,
                         self.q,
                         self.barrett_hi,
+                        self.barrett_lo,
                         t,
                         m,
                     ),
@@ -181,6 +185,7 @@ impl GpuNttTables {
                         &self.forward_twiddles,
                         self.q,
                         self.barrett_hi,
+                        self.barrett_lo,
                         self.log_n,
                         first_fused,
                     ),
@@ -227,6 +232,7 @@ impl GpuNttTables {
                         &self.forward_twiddles,
                         self.q,
                         self.barrett_hi,
+                        self.barrett_lo,
                         t,
                         m,
                     ),
@@ -254,6 +260,7 @@ impl GpuNttTables {
                         &self.forward_twiddles,
                         self.q,
                         self.barrett_hi,
+                        self.barrett_lo,
                         self.log_n,
                         first_fused,
                     ),
@@ -300,6 +307,7 @@ impl GpuNttTables {
                         &self.inverse_twiddles,
                         self.q,
                         self.barrett_hi,
+                        self.barrett_lo,
                         num_fused,
                     ),
                 )?;
@@ -319,6 +327,7 @@ impl GpuNttTables {
                         &self.inverse_twiddles,
                         self.q,
                         self.barrett_hi,
+                        self.barrett_lo,
                         t,
                         m,
                     ),
@@ -334,7 +343,7 @@ impl GpuNttTables {
         unsafe {
             f.launch(
                 scale_cfg,
-                (&mut *data, self.n_inv, self.q, self.barrett_hi, self.n as u32),
+                (&mut *data, self.n_inv, self.q, self.barrett_hi, self.barrett_lo, self.n as u32),
             )?;
         }
 
@@ -375,6 +384,7 @@ impl GpuNttTables {
                         &self.inverse_twiddles,
                         self.q,
                         self.barrett_hi,
+                        self.barrett_lo,
                         num_fused,
                     ),
                 )?;
@@ -395,6 +405,7 @@ impl GpuNttTables {
                         &self.inverse_twiddles,
                         self.q,
                         self.barrett_hi,
+                        self.barrett_lo,
                         t,
                         m,
                     ),
@@ -411,7 +422,7 @@ impl GpuNttTables {
             f.launch_on_stream(
                 stream,
                 scale_cfg,
-                (&mut *data, self.n_inv, self.q, self.barrett_hi, self.n as u32),
+                (&mut *data, self.n_inv, self.q, self.barrett_hi, self.barrett_lo, self.n as u32),
             )?;
         }
 

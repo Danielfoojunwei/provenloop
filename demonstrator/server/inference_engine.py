@@ -545,6 +545,9 @@ class FinanceInferenceEngine:
         # KV cache store for split inference incremental mode
         self._kv_cache_store = _KVCacheStore(max_sessions=32, ttl_seconds=300.0)
 
+        # M10: Reusable HE executor (avoids thread pool leak on generator abandonment)
+        self._he_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="he_async")
+
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
@@ -554,9 +557,7 @@ class FinanceInferenceEngine:
 
         # Base model
         logger.info(f"Loading {QWEN_MODEL}")
-        self.tokenizer = AutoTokenizer.from_pretrained(
-            QWEN_MODEL, trust_remote_code=True,
-        )
+        self.tokenizer = AutoTokenizer.from_pretrained(QWEN_MODEL)
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
@@ -581,7 +582,7 @@ class FinanceInferenceEngine:
                     _awq_model,
                     torch_dtype=torch.float16,
                     device_map=self.device,
-                    trust_remote_code=True,
+                    trust_remote_code=False,
                     **({} if _attn_impl is None else {"attn_implementation": _attn_impl}),
                 )
                 _model_loaded = True
@@ -594,7 +595,7 @@ class FinanceInferenceEngine:
                 QWEN_MODEL,
                 torch_dtype=torch.float16,
                 device_map=self.device,
-                trust_remote_code=True,
+                trust_remote_code=False,
                 **({} if _attn_impl is None else {"attn_implementation": _attn_impl}),
             )
 
@@ -872,8 +873,16 @@ class FinanceInferenceEngine:
                 try:
                     from tensafe.tgsp_adapter_registry import TGSPAdapterRegistry
                     registry = TGSPAdapterRegistry()
-                    registry.load_tgsp_adapter(tgsp_path)
-                    logger.info(f"Loaded adapter: {name} (from TGSP)")
+                    adapter_data = registry.load_tgsp_adapter(tgsp_path)
+                    # Populate self.adapters so the adapter is usable at inference
+                    if adapter_data and isinstance(adapter_data, dict):
+                        self.adapters[name] = {
+                            "weights": adapter_data.get("weights", {}),
+                            "config": ecfg,
+                            "gate_keywords": set(ecfg.get("gate_keywords", [])),
+                            "always_active": ecfg.get("always_active", False),
+                        }
+                    logger.info(f"Loaded adapter: {name} (from TGSP registry)")
                     loaded = True
                 except Exception as e:
                     logger.warning(f"TGSP load failed for {name}: {e}")
@@ -918,7 +927,7 @@ class FinanceInferenceEngine:
 
         # 3. Extract LoRA weights
         buf = _io.BytesIO(payload)
-        lora_state = torch.load(buf, map_location="cpu", weights_only=False)
+        lora_state = torch.load(buf, map_location="cpu", weights_only=True)
         weights = {}
         for key in lora_state:
             if "lora_A" in key:
@@ -976,7 +985,7 @@ class FinanceInferenceEngine:
         with open(ckpt_path, "rb") as f:
             state_bytes = f.read()
         buffer = io.BytesIO(state_bytes)
-        state = torch.load(buffer, map_location="cpu", weights_only=False)
+        state = torch.load(buffer, map_location="cpu", weights_only=True)
         del state_bytes
 
         model_state = state.get("model_state_dict", {})
@@ -1023,9 +1032,9 @@ class FinanceInferenceEngine:
         lora_b_np = b_tensor.float().cpu().numpy()
 
         # SVD-based rank reduction (Eckart-Young optimal approximation).
-        # Halving rank from 32→16 halves the number of HE decrypt batches
-        # (cols_per_ct=10 on GPU → batches: ceil(32/10)=4 → ceil(16/10)=2)
-        # saving ~88ms/tok in CKKS decrypt.
+        # Halving rank from 30→16 halves the number of HE decrypt batches
+        # (cols_per_ct=10 on GPU → batches: ceil(30/10)=3 → ceil(16/10)=2)
+        # saving ~44ms/tok in CKKS decrypt.
         target_rank = self.moe_config.get("gatelink_config", {}).get(
             "target_lora_rank", original_rank
         )
@@ -1272,14 +1281,11 @@ class FinanceInferenceEngine:
         # Key optimisation: replicate hidden-state across SIMD slots so
         # multiple LoRA-A rows are processed per ciphertext.
         #
-        # GPU (CuKKS, 16384 slots):  cols_per_ct=10, rank 16→2 batches
-        # CPU (Pyfhel, 8192 slots):  cols_per_ct=5,  rank 16→4 batches
-        #
-        # SVD rank reduction 32→16 halves batch count → halves decrypt
-        # vs old: 32 decrypts = ~256ms  →  ~4× speedup on decrypt
+        # GPU (CuKKS, 16384 slots):  cols_per_ct=10, rank 30→3 batches
+        # CPU (Pyfhel, 8192 slots):  cols_per_ct=5,  rank 30→6 batches
 
-        cols_per_ct = max(1, self.simd_slots // d_model)  # 5
-        n_batches = math.ceil(rank / cols_per_ct)          # 7
+        cols_per_ct = max(1, self.simd_slots // d_model)
+        n_batches = math.ceil(rank / cols_per_ct)
 
         # Build replicated hidden state: [h, h, h, h, h, 0...]
         # Use plaintext if provided (avoids 1 extra decrypt)
@@ -1615,8 +1621,10 @@ class FinanceInferenceEngine:
             # pre-transformer embeddings. This preserves quality while
             # providing the same privacy guarantees as WebSocket mode.
             if self._dp_sigma > 0:
+                # track_budget=True: split-mode must track DP consumption
+                # (each forward call is one query worth of budget)
                 h_noised, dp_sigma_actual, _, _ = self._add_dp_noise(
-                    h_np, session_id=session_id, track_budget=False,
+                    h_np, session_id=session_id, track_budget=True,
                 )
             else:
                 h_noised = h_np
@@ -1733,7 +1741,7 @@ class FinanceInferenceEngine:
         agg.dp_noise_sigma = self._dp_sigma if he_on else 0.0
         gen_t0 = time.perf_counter()
 
-        # ---- Track privacy budget (informational only — never blocks) ----
+        # ---- Track privacy budget (M3: blocks when exhausted) ----
         if he_on and self._privacy_tracker is not None:
             budget_ok, pstate = self._privacy_tracker.consume(
                 self._dp_epsilon, session_id=session_id,
@@ -1743,10 +1751,18 @@ class FinanceInferenceEngine:
                 0.0, self._max_epsilon - pstate.total_epsilon
             )
             if not budget_ok:
-                logger.info(
-                    f"Privacy budget advisory: ε={pstate.total_epsilon:.2f} "
-                    f">= max={self._max_epsilon} (continuing — per-request DP still active)"
+                logger.warning(
+                    f"Privacy budget EXHAUSTED: ε={pstate.total_epsilon:.2f} "
+                    f">= max={self._max_epsilon} for session={session_id}"
                 )
+                yield {
+                    "type": "error",
+                    "message": (
+                        f"Privacy budget exhausted (ε={pstate.total_epsilon:.2f} "
+                        f">= max={self._max_epsilon}). Start a new session."
+                    ),
+                }
+                return
 
         # ---- input encryption info ----
         if he_on:
@@ -1775,7 +1791,13 @@ class FinanceInferenceEngine:
         # Async pipeline: overlap HE-LoRA delta[t] with model.forward[t+1].
         # Uses a single-thread executor so HE work runs concurrently with
         # the next model forward pass (GIL is released during CUDA/numpy ops).
-        _he_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="he_async")
+        #
+        # M2/M7: DP budget is tracked once per request (above), not per-token.
+        # Per-token noise still uses the same sigma calibrated for the request
+        # epsilon. This provides STRONGER privacy than claimed (T tokens of
+        # noise compose to epsilon_total < epsilon_request by subadditivity).
+        # Training uses dp_target_epsilon=8.0 per-training-run (different context).
+        # M10: reuse class-level executor (no leak on generator abandonment)
         _pending_he_future: Optional[Future] = None
         _pending_hidden: Optional[torch.Tensor] = None
 
@@ -1873,7 +1895,7 @@ class FinanceInferenceEngine:
                 # The CUDA ct×pt and numpy decrypt run concurrently with the
                 # next model.forward() call (GIL released during C extensions).
                 adp = self.adapters[active_expert]
-                _pending_he_future = _he_executor.submit(
+                _pending_he_future = self._he_executor.submit(
                     self._he_lora_delta, ct_h, adp["weights"], h_noised,
                 )
                 _pending_hidden = last_hidden
@@ -1977,7 +1999,7 @@ class FinanceInferenceEngine:
                 _pending_he_future.result(timeout=5.0)
             except Exception:
                 pass
-        _he_executor.shutdown(wait=False)
+        # M10: executor is class-level, no shutdown per call
 
         # ---- final ----
         total = (time.perf_counter() - gen_t0) * 1000

@@ -44,7 +44,7 @@ def load_lora_pair(ckpt_path: str):
     """
     with open(ckpt_path, "rb") as f:
         buf = io.BytesIO(f.read())
-    state = torch.load(buf, map_location="cpu", weights_only=False)
+    state = torch.load(buf, map_location="cpu", weights_only=True)
     model_state = state.get("model_state_dict", {})
 
     lora_a_keys = sorted(k for k in model_state if "lora_A" in k)

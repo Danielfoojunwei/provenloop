@@ -38,12 +38,12 @@ def setup_model():
         bnb_4bit_use_double_quant=True
     )
     
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, trust_remote_code=True)
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, trust_remote_code=False)
     model = AutoModelForCausalLM.from_pretrained(
         MODEL_ID,
         quantization_config=bnb_config,
         device_map="auto",
-        trust_remote_code=True
+        trust_remote_code=False
     )
     
     # Configure LoRA targeting both attention and MoE projections

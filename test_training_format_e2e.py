@@ -2,7 +2,7 @@
 import numpy as np, base64, json, urllib.request
 
 from transformers import AutoTokenizer
-tok = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-1.5B", trust_remote_code=True)
+tok = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-1.5B", trust_remote_code=False)
 
 HD = 1536
 w = np.fromfile("demonstrator/frontend/weights/embed_tokens.bin", dtype=np.float16).reshape(-1, HD)

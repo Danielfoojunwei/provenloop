@@ -1,0 +1,19 @@
+apiVersion: v2
+name: tensafe-runtime
+description: TenSafe Privacy-Preserving AI Inference Runtime
+type: application
+version: 1.0.0
+appVersion: "1.0.0"
+keywords:
+  - ai
+  - inference
+  - homomorphic-encryption
+  - privacy
+  - tgsp
+  - lora
+  - enterprise
+maintainers:
+  - name: TenSafe Engineering
+home: https://tensafe.io
+sources:
+  - https://github.com/tensafe/tensafe-runtime

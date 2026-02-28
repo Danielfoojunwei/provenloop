@@ -2,11 +2,18 @@
 TenSafe Adapter Marketplace — registry for browsing, loading, and
 metering marketplace TGSP adapters.
 
+Business model:
+  - 0% transaction fee on buying/selling (creators keep 100%)
+  - Revenue comes from VALIDATION: adapters must be TenSafe Validated to list
+  - Every adapter has an embedded SKILL.md (skill_doc) that agents can read
+  - Validation = RVUv2 screening + quality benchmark + security check
+
 Provides:
   - Adapter discovery from a local directory of .tgsp files
-  - TGSP package verification (magic bytes, payload hash)
+  - TGSP package verification (magic bytes, payload hash, signatures, RVUv2)
   - Usage metering for billing integration
-  - Manifest parsing for adapter metadata
+  - Manifest parsing for adapter metadata (including embedded SKILL.md)
+  - Validation-gated listing (TenSafe Validated badge required)
 """
 
 import hashlib
@@ -19,6 +26,11 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 logger = logging.getLogger(__name__)
+
+
+MARKETPLACE_FEE_PERCENT = 0  # 0% transaction fee — creators keep 100%
+
+VALIDATION_REQUIRED = True  # Adapters must be TenSafe Validated to list
 
 
 @dataclass
@@ -42,6 +54,13 @@ class AdapterListing:
     payload_hash: str
     tgsp_path: str
     usage_metering: bool = True
+    # TGSP v1.1 fields
+    skill_doc: str = ""  # Embedded SKILL.md — agents read this
+    validated: bool = False  # TenSafe Validated badge
+    validation_timestamp: str = ""
+    creator_verified: bool = False
+    rvu_screening_passed: bool = False
+    lora_config: Optional[Dict] = None
 
 
 @dataclass
@@ -78,27 +97,76 @@ class AdapterMarketplace:
                 manifest = self._read_manifest(tgsp_path)
                 if manifest is None:
                     continue
-                meta = manifest.get("metadata", {})
-                adapter_id = manifest.get("adapter_id", tgsp_path.stem)
-                listing = AdapterListing(
-                    adapter_id=adapter_id,
-                    name=manifest.get("model_name", tgsp_path.stem),
-                    version=manifest.get("model_version", "0.0.0"),
-                    format_version=manifest.get("format_version", "1.0"),
-                    domain=meta.get("domain", "general"),
-                    expert_type=meta.get("expert_type", "unknown"),
-                    rank=manifest.get("rank", 0),
-                    alpha=manifest.get("alpha", 0),
-                    license=manifest.get("license", "unknown"),
-                    price_per_1k_tokens=manifest.get("price_per_1k_tokens", 0.0),
-                    creator=manifest.get("creator", "unknown"),
-                    description=meta.get("description", ""),
-                    tags=meta.get("tags", []),
-                    payload_size=manifest.get("payload_size", 0),
-                    payload_hash=manifest.get("payload_hash", ""),
-                    tgsp_path=str(tgsp_path),
-                    usage_metering=manifest.get("usage_metering", False),
-                )
+                # Support both v1.0 (legacy) and v1.1 (new) manifest formats
+                is_v11 = manifest.get("format") == "TGSP" and manifest.get("version") == "1.1"
+
+                if is_v11:
+                    # TGSP v1.1 manifest with full skill_doc, LoraConfig, creator, etc.
+                    skill = manifest.get("skill", {})
+                    creator_info = manifest.get("creator", {})
+                    lora_cfg = manifest.get("lora_config", {})
+                    rvu = manifest.get("rvu_safety", {})
+                    integrity = manifest.get("integrity", {})
+                    adapter_id = manifest.get("name", tgsp_path.stem)
+
+                    # Enforce validation requirement
+                    is_validated = rvu.get("screening_passed", False) and creator_info.get("verified", False)
+                    if VALIDATION_REQUIRED and not is_validated:
+                        logger.warning(
+                            f"Marketplace: skipping unvalidated adapter '{adapter_id}' "
+                            f"(RVUv2={rvu.get('screening_passed')}, creator_verified={creator_info.get('verified')})"
+                        )
+                        continue
+
+                    listing = AdapterListing(
+                        adapter_id=adapter_id,
+                        name=manifest.get("name", tgsp_path.stem),
+                        version=manifest.get("version", "1.1"),
+                        format_version="1.1",
+                        domain=manifest.get("domain", "general"),
+                        expert_type=manifest.get("model", {}).get("architecture", "sparse_moe"),
+                        rank=lora_cfg.get("rank", 30),
+                        alpha=lora_cfg.get("alpha", 64),
+                        license=manifest.get("license", "unknown"),
+                        price_per_1k_tokens=manifest.get("price_per_1k_tokens", 0.0),
+                        creator=creator_info.get("name", "unknown"),
+                        description=skill.get("description", ""),
+                        tags=skill.get("triggers", []),
+                        payload_size=0,
+                        payload_hash=integrity.get("payload_hash", ""),
+                        tgsp_path=str(tgsp_path),
+                        usage_metering=True,
+                        # v1.1 fields
+                        skill_doc=manifest.get("skill_doc", ""),
+                        validated=is_validated,
+                        validation_timestamp=rvu.get("screening_timestamp", ""),
+                        creator_verified=creator_info.get("verified", False),
+                        rvu_screening_passed=rvu.get("screening_passed", False),
+                        lora_config=lora_cfg,
+                    )
+                else:
+                    # Legacy v1.0 format
+                    meta = manifest.get("metadata", {})
+                    adapter_id = manifest.get("adapter_id", tgsp_path.stem)
+                    listing = AdapterListing(
+                        adapter_id=adapter_id,
+                        name=manifest.get("model_name", tgsp_path.stem),
+                        version=manifest.get("model_version", "0.0.0"),
+                        format_version=manifest.get("format_version", "1.0"),
+                        domain=meta.get("domain", "general"),
+                        expert_type=meta.get("expert_type", "unknown"),
+                        rank=manifest.get("rank", 0),
+                        alpha=manifest.get("alpha", 0),
+                        license=manifest.get("license", "unknown"),
+                        price_per_1k_tokens=manifest.get("price_per_1k_tokens", 0.0),
+                        creator=manifest.get("creator", "unknown"),
+                        description=meta.get("description", ""),
+                        tags=meta.get("tags", []),
+                        payload_size=manifest.get("payload_size", 0),
+                        payload_hash=manifest.get("payload_hash", ""),
+                        tgsp_path=str(tgsp_path),
+                        usage_metering=manifest.get("usage_metering", False),
+                    )
                 self._listings[adapter_id] = listing
                 logger.info(
                     f"Marketplace: indexed adapter '{listing.name}' "
@@ -197,10 +265,54 @@ class AdapterMarketplace:
         """Get usage stats for all adapters."""
         return dict(self._usage)
 
+    def search_by_skill(self, task_description: str) -> List[AdapterListing]:
+        """Search adapters by matching task description against embedded SKILL.md.
+
+        An agent provides a task description, and we find adapters whose
+        skill_doc or triggers suggest they can handle the task.
+        """
+        task_lower = task_description.lower()
+        results = []
+        for listing in self._listings.values():
+            # Check triggers
+            if any(trigger.lower() in task_lower for trigger in listing.tags):
+                results.append(listing)
+                continue
+            # Check skill_doc content
+            if listing.skill_doc and any(
+                word in listing.skill_doc.lower()
+                for word in task_lower.split()
+                if len(word) > 3
+            ):
+                results.append(listing)
+        return results
+
+    def get_skill_doc(self, adapter_id: str) -> Optional[str]:
+        """Get the embedded SKILL.md for an adapter.
+
+        This is the key method agents use to understand what an adapter does.
+        Every TGSP adapter IS a skill file — this returns that skill description.
+        """
+        listing = self._listings.get(adapter_id)
+        if listing is None:
+            return None
+        return listing.skill_doc or listing.description
+
+    def is_validated(self, adapter_id: str) -> bool:
+        """Check if an adapter has the TenSafe Validated badge."""
+        listing = self._listings.get(adapter_id)
+        return listing is not None and listing.validated
+
+    def get_marketplace_fee(self) -> float:
+        """Get the marketplace transaction fee percentage. Currently 0%."""
+        return MARKETPLACE_FEE_PERCENT
+
     def to_dict(self) -> dict:
         """Serialize the marketplace state for API responses."""
         return {
             "adapter_count": len(self._listings),
+            "marketplace_fee_percent": MARKETPLACE_FEE_PERCENT,
+            "validation_required": VALIDATION_REQUIRED,
             "adapters": [
                 {
                     "adapter_id": a.adapter_id,
@@ -214,6 +326,10 @@ class AdapterMarketplace:
                     "description": a.description,
                     "tags": a.tags,
                     "rank": a.rank,
+                    "validated": a.validated,
+                    "creator_verified": a.creator_verified,
+                    "rvu_screening_passed": a.rvu_screening_passed,
+                    "has_skill_doc": bool(a.skill_doc),
                     "usage": {
                         "total_tokens": self._usage.get(
                             a.adapter_id, UsageRecord(a.adapter_id)

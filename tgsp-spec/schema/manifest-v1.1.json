@@ -1,0 +1,258 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tensafe.dev/tgsp/manifest-v1.1.json",
+  "title": "TGSP Manifest v1.1",
+  "description": "JSON Schema for the TenSafe Gated Secure Package manifest, version 1.1.",
+  "type": "object",
+  "required": [
+    "format",
+    "version",
+    "name",
+    "domain",
+    "model",
+    "lora_config",
+    "skill",
+    "skill_doc",
+    "rvu_safety",
+    "creator",
+    "integrity",
+    "signatures"
+  ],
+  "properties": {
+    "format": {
+      "type": "string",
+      "const": "TGSP",
+      "description": "Format identifier. Must be 'TGSP'."
+    },
+    "version": {
+      "type": "string",
+      "const": "1.1",
+      "description": "Manifest schema version."
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "description": "Human-readable adapter name."
+    },
+    "domain": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "description": "Domain identifier (e.g. 'medical', 'legal', 'code')."
+    },
+    "model": {
+      "type": "object",
+      "required": ["architecture", "base_model", "num_experts", "experts_per_token"],
+      "properties": {
+        "architecture": {
+          "type": "string",
+          "description": "Model architecture type (e.g. 'sparse_moe', 'dense', 'mixture_of_experts')."
+        },
+        "base_model": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Base model identifier (e.g. HuggingFace model ID)."
+        },
+        "num_experts": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Total number of MoE experts."
+        },
+        "experts_per_token": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Number of experts activated per token."
+        }
+      },
+      "additionalProperties": false
+    },
+    "lora_config": {
+      "$ref": "lora_config.json"
+    },
+    "skill": {
+      "type": "object",
+      "required": [
+        "description",
+        "triggers",
+        "capabilities",
+        "input_format",
+        "output_format",
+        "quality_score",
+        "compliance",
+        "composable_with"
+      ],
+      "properties": {
+        "description": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Human-readable description of the adapter's purpose."
+        },
+        "triggers": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Activation triggers or keywords."
+        },
+        "capabilities": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "List of capabilities provided by the adapter."
+        },
+        "input_format": {
+          "type": "string",
+          "description": "Expected input format (e.g. 'text', 'json', 'image+text')."
+        },
+        "output_format": {
+          "type": "string",
+          "description": "Expected output format."
+        },
+        "quality_score": {
+          "type": "number",
+          "minimum": 0.0,
+          "maximum": 1.0,
+          "description": "Quality metric ranging from 0.0 (lowest) to 1.0 (highest)."
+        },
+        "compliance": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Compliance standards met (e.g. 'HIPAA', 'SOC2', 'GDPR')."
+        },
+        "composable_with": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Names of adapters this one can be composed with."
+        }
+      },
+      "additionalProperties": false
+    },
+    "skill_doc": {
+      "type": "string",
+      "minLength": 50,
+      "description": "Full embedded SKILL.md document in markdown format. This is the human- and agent-readable description of what this adapter does, when to use it, its capabilities, compliance, and composition rules. Every TGSP adapter IS a skill file — agents read this to decide whether to load the adapter for a given task."
+    },
+    "rvu_safety": {
+      "type": "object",
+      "required": [
+        "version",
+        "layers",
+        "screening_passed",
+        "screening_timestamp",
+        "screening_hash"
+      ],
+      "properties": {
+        "version": {
+          "type": "string",
+          "const": "RVUv2",
+          "description": "RVU safety screening version. Must be 'RVUv2'."
+        },
+        "layers": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": ["allowlist", "svd_analysis", "mahalanobis_ood"]
+          },
+          "minItems": 1,
+          "uniqueItems": true,
+          "description": "Screening layers applied. Standard layers: allowlist, svd_analysis, mahalanobis_ood."
+        },
+        "screening_passed": {
+          "type": "boolean",
+          "description": "Whether the adapter passed all screening layers."
+        },
+        "screening_timestamp": {
+          "type": "string",
+          "format": "date-time",
+          "description": "ISO 8601 timestamp of when screening was performed."
+        },
+        "screening_hash": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$",
+          "description": "SHA-256 hash of the full screening report."
+        }
+      },
+      "additionalProperties": false
+    },
+    "creator": {
+      "type": "object",
+      "required": [
+        "name",
+        "organization",
+        "email",
+        "public_key_fingerprint",
+        "verified"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Creator display name."
+        },
+        "organization": {
+          "type": "string",
+          "description": "Organization name."
+        },
+        "email": {
+          "type": "string",
+          "format": "email",
+          "description": "Contact email address."
+        },
+        "public_key_fingerprint": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$",
+          "description": "SHA-256 fingerprint of the creator's Ed25519 public key."
+        },
+        "verified": {
+          "type": "boolean",
+          "description": "Whether the creator's identity has been externally verified."
+        }
+      },
+      "additionalProperties": false
+    },
+    "integrity": {
+      "type": "object",
+      "required": ["payload_hash", "manifest_hash", "hash_algorithm"],
+      "properties": {
+        "payload_hash": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$",
+          "description": "SHA-256 hex digest of the payload (LoRA weights)."
+        },
+        "manifest_hash": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$",
+          "description": "SHA-256 hex digest of the manifest JSON (before signatures)."
+        },
+        "hash_algorithm": {
+          "type": "string",
+          "const": "SHA-256",
+          "description": "Hash algorithm used. Must be 'SHA-256'."
+        }
+      },
+      "additionalProperties": false
+    },
+    "signatures": {
+      "type": "object",
+      "required": ["ed25519", "dilithium3", "signed_fields"],
+      "properties": {
+        "ed25519": {
+          "type": "string",
+          "description": "Base64-encoded Ed25519 signature over the signed fields."
+        },
+        "dilithium3": {
+          "type": "string",
+          "description": "Base64-encoded Dilithium3 (post-quantum) signature over the signed fields."
+        },
+        "signed_fields": {
+          "type": "array",
+          "items": { "type": "string" },
+          "minItems": 4,
+          "uniqueItems": true,
+          "contains": { "const": "integrity" },
+          "description": "Manifest fields covered by the signatures. Must include 'integrity', 'creator', 'rvu_safety', 'lora_config'."
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

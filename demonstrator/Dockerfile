@@ -26,7 +26,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.80.0
 ENV PATH="/root/.cargo/bin:${PATH}"
-RUN pip install --no-cache-dir --break-system-packages maturin>=1.0
+RUN pip install --no-cache-dir --break-system-packages 'maturin>=1.0'
 
 COPY tensafe-he/ /build/tensafe-he/
 RUN cd /build/tensafe-he/crates/tensafe-he-python \
@@ -52,8 +52,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 # ---- Python dependencies ----
+# Install core dependencies (flash-attn & autoawq require CUDA compilation
+# and are optional — the code falls back to SDPA / float16 gracefully).
 COPY requirements.txt /app/requirements.txt
-RUN pip install --no-cache-dir -r /app/requirements.txt
+RUN grep -vE '^flash-attn|^autoawq' /app/requirements.txt > /app/requirements-core.txt \
+    && pip install --no-cache-dir -r /app/requirements-core.txt
+
+# Optional GPU-accelerated packages (fail gracefully on CPU-only / CI builds)
+RUN pip install --no-cache-dir 'flash-attn>=2.0' 2>/dev/null \
+    || echo "INFO: flash-attn skipped (requires CUDA compiler)"
+RUN pip install --no-cache-dir 'autoawq>=0.2.0' 2>/dev/null \
+    || echo "INFO: autoawq skipped (requires CUDA compiler)"
 
 # ---- Install pre-built tensafe-he wheel from builder stage ----
 COPY --from=rust-builder /build/tensafe-he/target/wheels/tensafe_he-*.whl /tmp/

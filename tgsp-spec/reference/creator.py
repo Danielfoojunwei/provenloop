@@ -443,6 +443,106 @@ class TGSPCreator:
         """
         return self.create(lora_bytes, private_key, dilithium3_key_bytes)
 
+    # ------------------------------------------------------------------
+    # TSA Counter-Signing
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def counter_sign_with_tsa(
+        tgsp_bytes: bytes,
+        tsa_private_key: Ed25519PrivateKey,
+        tsa_payload: bytes,
+        tsa_version: str = "1.0.0",
+        max_tsa_version: str = "2.0.0",
+    ) -> bytes:
+        """
+        Counter-sign a domain adapter's TGSP file with the TSA key.
+
+        This adds a ``tsa_binding`` section to the manifest containing:
+        - tsa_fingerprint: SHA-256 of the TSA's Ed25519 public key
+        - compatibility_hash: SHA-256(TSA_weights || domain_adapter_weights)
+        - min_tsa_version / max_tsa_version: compatibility range
+        - counter_signature: Ed25519 signature of the domain manifest by TSA key
+
+        The domain adapter can then only be loaded when a compatible TSA is
+        present.  The load gate (step 7) verifies all binding fields.
+
+        Parameters
+        ----------
+        tgsp_bytes : bytes
+            The original .tgsp file bytes (already signed by creator).
+        tsa_private_key : Ed25519PrivateKey
+            The TSA's Ed25519 private key for counter-signing.
+        tsa_payload : bytes
+            Raw TSA adapter weights (used for compatibility hash).
+        tsa_version : str
+            Current TSA version (minimum version for this binding).
+        max_tsa_version : str
+            Maximum TSA version this adapter supports.
+
+        Returns
+        -------
+        bytes
+            New .tgsp file bytes with tsa_binding added to the manifest.
+        """
+        # Parse the existing TGSP file
+        if len(tgsp_bytes) < 10:
+            raise ValueError("TGSP file too short")
+        magic = tgsp_bytes[:6]
+        if magic != TGSP_MAGIC:
+            raise ValueError(f"Bad TGSP magic: {magic!r}")
+
+        manifest_len = struct.unpack_from("<I", tgsp_bytes, 6)[0]
+        manifest_bytes = tgsp_bytes[10 : 10 + manifest_len]
+        payload = tgsp_bytes[10 + manifest_len :]
+
+        manifest = json.loads(manifest_bytes.decode("utf-8"))
+
+        # Compute TSA fingerprint
+        tsa_public_key = tsa_private_key.public_key()
+        tsa_fingerprint = compute_public_key_fingerprint(tsa_public_key)
+
+        # Compute compatibility hash: SHA-256(TSA_weights || domain_weights)
+        h = hashlib.sha256()
+        h.update(tsa_payload)
+        h.update(payload)
+        compatibility_hash = h.hexdigest()
+
+        # Build message for counter-signature (all manifest fields except
+        # tsa_binding and signatures to avoid circular dependency)
+        sig_fields = {
+            k: v for k, v in manifest.items()
+            if k not in ("tsa_binding", "signatures")
+        }
+        sig_message = canonical_json(sig_fields)
+        counter_sig = tsa_private_key.sign(sig_message)
+        counter_sig_b64 = base64.b64encode(counter_sig).decode("ascii")
+
+        # Add tsa_binding to manifest
+        manifest["tsa_binding"] = {
+            "required": True,
+            "tsa_fingerprint": tsa_fingerprint,
+            "compatibility_hash": compatibility_hash,
+            "min_tsa_version": tsa_version,
+            "max_tsa_version": max_tsa_version,
+            "counter_signature": counter_sig_b64,
+        }
+
+        # Update adapter_type if not set
+        if "adapter_type" not in manifest:
+            manifest["adapter_type"] = "domain"
+
+        # Update version to 1.2
+        manifest["version"] = "1.2"
+
+        # Re-encode manifest
+        new_manifest_bytes = json.dumps(
+            manifest, sort_keys=True, indent=2
+        ).encode("utf-8")
+        new_manifest_len = struct.pack("<I", len(new_manifest_bytes))
+
+        return TGSP_MAGIC + new_manifest_len + new_manifest_bytes + payload
+
 
 # ---------------------------------------------------------------------------
 # CLI entry point

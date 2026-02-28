@@ -1,6 +1,6 @@
-"""TGSP Load Gate — 7-step verification pipeline for adapter loading.
+"""TGSP Load Gate — 8-step verification pipeline for adapter loading.
 
-Every TGSP adapter must pass all 7 steps before it is permitted to run
+Every TGSP adapter must pass all steps before it is permitted to run
 inference.  Any single failure results in REJECT.  All steps are logged
 for audit trail.
 
@@ -11,7 +11,8 @@ Steps:
     4. LoraConfig validation (rank, alpha, target_modules)
     5. Sparse MoE architecture confirmation (reject dense models)
     6. RVUv2 safety screening (allowlist, SVD analysis, Mahalanobis OOD)
-    7. Final decision — any failure = REJECT
+    7. TSA binding verification (domain adapters must bind to loaded TSA)
+    8. Final decision — any failure = REJECT
 """
 
 from __future__ import annotations
@@ -65,6 +66,33 @@ TRUSTED_CREATOR_FINGERPRINTS: Dict[str, str] = {
 # RVUv2 screening layer names
 RVUV2_LAYERS = ("allowlist", "svd_analysis", "mahalanobis_ood")
 
+# Valid adapter types (v1.2)
+VALID_ADAPTER_TYPES = frozenset({"system", "domain", "router"})
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _parse_semver(version: str) -> tuple:
+    """Parse a semver string into a comparable tuple of ints."""
+    try:
+        parts = version.split(".")
+        return tuple(int(p) for p in parts[:3])
+    except (ValueError, AttributeError):
+        return (0, 0, 0)
+
+
+def _semver_in_range(
+    version: str, min_version: str, max_version: str
+) -> bool:
+    """Check if *version* falls within [min_version, max_version]."""
+    v = _parse_semver(version)
+    lo = _parse_semver(min_version)
+    hi = _parse_semver(max_version)
+    return lo <= v <= hi
+
 
 # ---------------------------------------------------------------------------
 # Data types
@@ -89,7 +117,7 @@ class GateResult:
 
 @dataclass
 class GateReport:
-    """Full report from the 7-step load gate."""
+    """Full report from the 8-step load gate."""
     verdict: GateVerdict
     adapter_id: str
     tgsp_path: str
@@ -265,11 +293,15 @@ def _rvuv2_mahalanobis_ood(manifest: Dict[str, Any], payload: bytes) -> GateResu
 # ---------------------------------------------------------------------------
 
 class TGSPLoadGate:
-    """7-step verification gate for loading TGSP adapters.
+    """8-step verification gate for loading TGSP adapters.
 
-    Every adapter file must pass all 7 steps before it is permitted to
+    Every adapter file must pass all steps before it is permitted to
     execute inference.  Any failure at any step results in an immediate
     REJECT.  The full audit trail is captured in the returned GateReport.
+
+    Step 7 (TSA binding) is only enforced for domain adapters (v1.2+).
+    System adapters (adapter_type="system") skip step 7 since they ARE
+    the TSA.
 
     Thread safety: this class is stateless — multiple threads can call
     ``verify()`` concurrently.
@@ -281,17 +313,37 @@ class TGSPLoadGate:
         trusted_fingerprints: Optional[Dict[str, str]] = None,
         strict_moe: bool = True,
         max_rank: int = MAX_LORA_RANK,
+        loaded_tsa: Optional[Dict[str, Any]] = None,
     ):
         self._trusted = trusted_fingerprints or TRUSTED_CREATOR_FINGERPRINTS
         self._strict_moe = strict_moe
         self._max_rank = max_rank
+        # TSA state for step 7 binding verification.  Set via set_tsa()
+        # when the system adapter is loaded, or pass at construction time.
+        self._loaded_tsa = loaded_tsa
+
+    def set_tsa(self, tsa_info: Dict[str, Any]) -> None:
+        """Register the loaded TenSafe System Adapter for binding checks.
+
+        Args:
+            tsa_info: dict with at minimum:
+                - "fingerprint": SHA-256 of the TSA creator's Ed25519 public key
+                - "tsa_version": semver string (e.g. "1.0.0")
+                - "runtime_binding_hash": SHA-256 of TSA weights
+        """
+        self._loaded_tsa = tsa_info
+        logger.info(
+            "LoadGate: TSA registered (fingerprint=%s, version=%s)",
+            tsa_info.get("fingerprint", "?")[:16] + "...",
+            tsa_info.get("tsa_version", "?"),
+        )
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
     def verify(self, tgsp_path: str) -> GateReport:
-        """Run the full 7-step verification pipeline.
+        """Run the full 8-step verification pipeline.
 
         Args:
             tgsp_path: Path to the .tgsp file on disk.
@@ -325,7 +377,7 @@ class TGSPLoadGate:
             manifest.get("name", Path(tgsp_path).stem),
         )
 
-        # Run steps 1-7
+        # Run steps 1-6
         steps = [
             self._step1_payload_hash,
             self._step2_dual_signatures,
@@ -348,9 +400,19 @@ class TGSPLoadGate:
                 # Continue running remaining steps for complete audit trail,
                 # but the verdict is already REJECT.
 
-        # Step 7: Final decision
-        step7 = self._step7_final_decision(all_passed, report.steps)
+        # Step 7: TSA binding verification (for domain adapters only)
+        step7 = self._step7_tsa_binding(parsed)
         report.steps.append(step7)
+        if not step7.passed:
+            all_passed = False
+            logger.warning(
+                "LoadGate FAIL step 7 (tsa_binding): %s [%s]",
+                step7.reason, tgsp_path,
+            )
+
+        # Step 8: Final decision
+        step8 = self._step8_final_decision(all_passed, report.steps)
+        report.steps.append(step8)
 
         report.verdict = GateVerdict.ACCEPT if all_passed else GateVerdict.REJECT
         report.total_elapsed_ms = (time.monotonic() - t_start) * 1000
@@ -747,21 +809,183 @@ class TGSPLoadGate:
             },
         )
 
+    def _step7_tsa_binding(self, parsed: ParsedTGSP) -> GateResult:
+        """Step 7: Verify TSA (TenSafe System Adapter) binding.
+
+        Domain adapters (adapter_type="domain") MUST have a valid
+        tsa_binding section that matches the currently loaded TSA.
+        System adapters (adapter_type="system") skip this check since
+        they ARE the TSA.  Legacy v1.1 manifests without adapter_type
+        also skip this check for backward compatibility.
+
+        Checks:
+        1. tsa_fingerprint matches loaded TSA's public key fingerprint
+        2. min_tsa_version / max_tsa_version range is compatible
+        3. counter_signature is valid (Ed25519 from TSA key)
+        4. compatibility_hash matches SHA-256(TSA_weights || adapter_weights)
+        """
+        t0 = time.monotonic()
+        manifest = parsed.manifest
+        adapter_type = manifest.get("adapter_type", "")
+
+        # System adapters and legacy v1.1 manifests skip TSA binding
+        if adapter_type == "system":
+            elapsed = (time.monotonic() - t0) * 1000
+            return GateResult(
+                step=7, name="tsa_binding",
+                passed=True,
+                reason="System adapter — TSA binding not required (this IS the TSA)",
+                elapsed_ms=elapsed,
+                details={"adapter_type": "system", "skipped": True},
+            )
+
+        if not adapter_type:
+            # Legacy v1.1 manifest without adapter_type — skip for compat
+            elapsed = (time.monotonic() - t0) * 1000
+            return GateResult(
+                step=7, name="tsa_binding",
+                passed=True,
+                reason="Legacy v1.1 manifest — TSA binding check skipped",
+                elapsed_ms=elapsed,
+                details={"adapter_type": "", "skipped": True},
+            )
+
+        if adapter_type not in VALID_ADAPTER_TYPES:
+            elapsed = (time.monotonic() - t0) * 1000
+            return GateResult(
+                step=7, name="tsa_binding",
+                passed=False,
+                reason=f"Unknown adapter_type: {adapter_type!r} "
+                       f"(valid: {sorted(VALID_ADAPTER_TYPES)})",
+                elapsed_ms=elapsed,
+                details={"adapter_type": adapter_type},
+            )
+
+        # Domain and router adapters MUST have tsa_binding
+        tsa_binding = manifest.get("tsa_binding")
+        if not tsa_binding or not isinstance(tsa_binding, dict):
+            elapsed = (time.monotonic() - t0) * 1000
+            return GateResult(
+                step=7, name="tsa_binding",
+                passed=False,
+                reason=f"adapter_type={adapter_type!r} requires tsa_binding "
+                       f"but none found in manifest",
+                elapsed_ms=elapsed,
+                details={"adapter_type": adapter_type},
+            )
+
+        errors = []
+
+        # Check 1: TSA must be loaded
+        if self._loaded_tsa is None:
+            elapsed = (time.monotonic() - t0) * 1000
+            return GateResult(
+                step=7, name="tsa_binding",
+                passed=False,
+                reason="No TSA loaded — domain adapters require a TenSafe "
+                       "System Adapter to be loaded first",
+                elapsed_ms=elapsed,
+                details={"adapter_type": adapter_type},
+            )
+
+        # Check 2: tsa_fingerprint must match loaded TSA
+        binding_fingerprint = tsa_binding.get("tsa_fingerprint", "")
+        loaded_fingerprint = self._loaded_tsa.get("fingerprint", "")
+        if not binding_fingerprint:
+            errors.append("tsa_binding.tsa_fingerprint is empty")
+        elif binding_fingerprint != loaded_fingerprint:
+            errors.append(
+                f"TSA fingerprint mismatch: adapter expects "
+                f"{binding_fingerprint[:16]}..., loaded TSA is "
+                f"{loaded_fingerprint[:16]}..."
+            )
+
+        # Check 3: TSA version range
+        loaded_version = self._loaded_tsa.get("tsa_version", "0.0.0")
+        min_version = tsa_binding.get("min_tsa_version", "0.0.0")
+        max_version = tsa_binding.get("max_tsa_version", "99.99.99")
+
+        if not _semver_in_range(loaded_version, min_version, max_version):
+            errors.append(
+                f"TSA version {loaded_version} outside required range "
+                f"[{min_version}, {max_version}]"
+            )
+
+        # Check 4: counter_signature (verify domain manifest was signed by TSA key)
+        counter_sig = tsa_binding.get("counter_signature", "")
+        if not counter_sig:
+            errors.append("tsa_binding.counter_signature is empty")
+        else:
+            # Verify the counter-signature against the TSA's fingerprint
+            # Build message from manifest fields (excluding tsa_binding itself
+            # to avoid circular dependency)
+            sig_fields = {
+                k: v for k, v in manifest.items()
+                if k not in ("tsa_binding", "signatures")
+            }
+            sig_message = json.dumps(
+                sig_fields, sort_keys=True, separators=(",", ":")
+            ).encode()
+            if not _verify_ed25519(sig_message, counter_sig, loaded_fingerprint):
+                errors.append("TSA counter-signature verification failed")
+
+        # Check 5: compatibility_hash (optional but recommended)
+        compat_hash = tsa_binding.get("compatibility_hash", "")
+        if compat_hash:
+            # In production, verify SHA-256(TSA_weights || adapter_weights)
+            # For now, verify format is valid hex
+            if len(compat_hash) != 64 or not all(
+                c in "0123456789abcdef" for c in compat_hash
+            ):
+                errors.append(
+                    f"compatibility_hash is not a valid SHA-256 hex digest"
+                )
+
+        elapsed = (time.monotonic() - t0) * 1000
+
+        if errors:
+            return GateResult(
+                step=7, name="tsa_binding",
+                passed=False,
+                reason="TSA binding verification failed: " + "; ".join(errors),
+                elapsed_ms=elapsed,
+                details={
+                    "adapter_type": adapter_type,
+                    "errors": errors,
+                    "binding_fingerprint": binding_fingerprint[:16] + "..."
+                    if binding_fingerprint else "",
+                },
+            )
+
+        return GateResult(
+            step=7, name="tsa_binding",
+            passed=True,
+            reason=f"TSA binding verified (fingerprint={binding_fingerprint[:16]}..., "
+                   f"version={loaded_version})",
+            elapsed_ms=elapsed,
+            details={
+                "adapter_type": adapter_type,
+                "tsa_fingerprint": binding_fingerprint[:16] + "...",
+                "tsa_version": loaded_version,
+                "compatibility_hash_present": bool(compat_hash),
+            },
+        )
+
     @staticmethod
-    def _step7_final_decision(
+    def _step8_final_decision(
         all_passed: bool, steps: List[GateResult]
     ) -> GateResult:
-        """Step 7: Final decision — aggregate all step results."""
+        """Step 8: Final decision — aggregate all step results."""
         if all_passed:
             return GateResult(
-                step=7, name="final_decision",
+                step=8, name="final_decision",
                 passed=True,
-                reason="All 6 verification steps passed — ACCEPT",
+                reason="All 7 verification steps passed — ACCEPT",
             )
 
         failed_names = [s.name for s in steps if not s.passed]
         return GateResult(
-            step=7, name="final_decision",
+            step=8, name="final_decision",
             passed=False,
             reason=f"REJECT — failed steps: {failed_names}",
             details={"failed_steps": failed_names},

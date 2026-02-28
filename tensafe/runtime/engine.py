@@ -1,15 +1,23 @@
 """TenSafe Proprietary Runtime Engine.
 
 The core execution engine that loads and runs TGSP adapters with
-HE-encrypted inference.  All adapters pass through the 7-step TGSP
+HE-encrypted inference.  All adapters pass through the 8-step TGSP
 Load Gate before they are permitted to run.  Inference is metered
 per-token for billing.  Adapters can be hot-swapped atomically
 without dropping in-flight requests.
 
+The TenSafe System Adapter (TSA) is a mandatory system-level adapter
+that must be loaded before any domain adapters.  It provides:
+  - Learned expert routing (replaces keyword gates)
+  - System awareness (metering, privacy budget, adapter composition)
+  - Throughput optimization (output length calibration)
+  - Cryptographic binding (domain adapters are counter-signed by TSA key)
+
 Architecture:
     RuntimeConfig --> TenSafeRuntime
-                        |-- TGSPLoadGate   (7-step verification)
+                        |-- TGSPLoadGate   (8-step verification)
                         |-- MeteringService (per-token billing)
+                        |-- TSA            (mandatory system adapter)
                         |-- Loaded adapters (thread-safe registry)
                         |-- HE engine      (CKKS encrypt/decrypt stub)
 """
@@ -88,6 +96,7 @@ class AdapterInfo:
     target_modules: List[str]
     domain: str
     tgsp_path: str
+    adapter_type: str = "domain"  # "system", "domain", or "router"
     loaded_at: float = field(default_factory=time.time)
     request_count: int = 0
     token_count: int = 0
@@ -180,7 +189,8 @@ class TenSafeRuntime:
     """Proprietary runtime for executing TGSP adapters with HE inference.
 
     This is the central engine that:
-      - Loads TGSP adapters through the 7-step load gate
+      - Loads the mandatory TSA (TenSafe System Adapter) first
+      - Loads domain TGSP adapters through the 8-step load gate
       - Runs HE-encrypted inference with per-token metering
       - Supports atomic hot-swap of adapters
       - Manages adapter lifecycle (load, unload, list)
@@ -210,27 +220,53 @@ class TenSafeRuntime:
         # Adapter registry
         self._adapters: Dict[str, _LoadedAdapter] = {}
 
+        # TSA (TenSafe System Adapter) state — must be loaded before
+        # any domain adapter.  The TSA adapter_id is stored here once
+        # a system adapter is loaded via load_adapter().
+        self._tsa_adapter_id: Optional[str] = None
+
         logger.info(
             "TenSafeRuntime initialized (strict_moe=%s, billing=%s, "
             "max_adapters=%d)",
             config.strict_moe, config.billing_enabled, config.max_loaded_adapters,
         )
 
+    @property
+    def tsa_loaded(self) -> bool:
+        """Whether the TenSafe System Adapter is loaded."""
+        return self._tsa_adapter_id is not None
+
+    @property
+    def tsa_adapter_id(self) -> Optional[str]:
+        """Adapter ID of the loaded TSA, or None if not loaded."""
+        return self._tsa_adapter_id
+
+    def get_tsa_info(self) -> Optional[AdapterInfo]:
+        """Get info for the loaded TSA, or None."""
+        if self._tsa_adapter_id is None:
+            return None
+        return self.get_adapter_info(self._tsa_adapter_id)
+
     # ------------------------------------------------------------------
     # Adapter loading
     # ------------------------------------------------------------------
 
     def load_adapter(self, tgsp_path: str) -> str:
-        """Load a TGSP adapter through the 7-step load gate.
+        """Load a TGSP adapter through the 8-step load gate.
 
-        The 7 steps are:
+        The 8 steps are:
             1. Verify SHA-256 payload hash
             2. Verify dual signatures (Ed25519 + Dilithium3)
             3. Verify creator identity
             4. Validate LoraConfig
             5. Confirm sparse MoE target
             6. Run RVUv2 safety screening (3 layers)
-            7. Any failure = REJECT
+            7. TSA binding verification (domain adapters must bind to TSA)
+            8. Final decision — any failure = REJECT
+
+        Domain adapters (adapter_type="domain") require a TSA to be loaded
+        first.  System adapters (adapter_type="system") are the TSA itself
+        and can be loaded without a prior TSA.
 
         Args:
             tgsp_path: Path to the .tgsp file.
@@ -240,7 +276,7 @@ class TenSafeRuntime:
 
         Raises:
             ValueError: If the adapter fails any load gate step.
-            RuntimeError: If the adapter limit is reached.
+            RuntimeError: If the adapter limit is reached or TSA not loaded.
         """
         with self._lock:
             active = sum(1 for a in self._adapters.values() if not a.draining)
@@ -249,7 +285,18 @@ class TenSafeRuntime:
                     f"Adapter limit reached: {active}/{self.config.max_loaded_adapters}"
                 )
 
-        # Step 1-7: Run the load gate
+        # Pre-check: peek at the manifest to determine adapter_type.
+        # Domain adapters require a loaded TSA.
+        pre_manifest = self._peek_manifest(tgsp_path)
+        adapter_type = pre_manifest.get("adapter_type", "")
+
+        if adapter_type == "domain" and not self.tsa_loaded:
+            raise RuntimeError(
+                f"Cannot load domain adapter {tgsp_path}: no TenSafe System "
+                f"Adapter (TSA) is loaded.  Load a system adapter first."
+            )
+
+        # Step 1-8: Run the load gate
         report = self.load_gate.verify(tgsp_path)
 
         if report.verdict != GateVerdict.ACCEPT:
@@ -278,8 +325,9 @@ class TenSafeRuntime:
             target_modules=lora_config.get(
                 "target_modules", manifest.get("target_modules", [])
             ),
-            domain=manifest.get("metadata", {}).get("domain", "general"),
+            domain=manifest.get("domain", manifest.get("metadata", {}).get("domain", "general")),
             tgsp_path=tgsp_path,
+            adapter_type=adapter_type or "domain",
         )
 
         loaded = _LoadedAdapter(
@@ -293,12 +341,45 @@ class TenSafeRuntime:
         with self._lock:
             self._adapters[adapter_id] = loaded
 
+            # If this is a system adapter, register it as the TSA
+            if adapter_type == "system":
+                self._tsa_adapter_id = adapter_id
+                # Register TSA info with load gate for step 7 binding checks
+                sys_caps = manifest.get("system_capabilities", {})
+                self.load_gate.set_tsa({
+                    "fingerprint": manifest.get("creator", {}).get(
+                        "public_key_fingerprint", ""
+                    ),
+                    "tsa_version": sys_caps.get("tsa_version", "1.0.0"),
+                    "runtime_binding_hash": sys_caps.get(
+                        "runtime_binding_hash", ""
+                    ),
+                })
+                logger.info(
+                    "TSA loaded: %s (id=%s) — domain adapters can now be loaded",
+                    info.name, adapter_id,
+                )
+
         logger.info(
-            "Adapter loaded: %s (id=%s, rank=%d, gate=%s in %.1f ms)",
-            info.name, adapter_id, info.rank,
-            report.verdict.value, report.total_elapsed_ms,
+            "Adapter loaded: %s (id=%s, type=%s, rank=%d, gate=%s in %.1f ms)",
+            info.name, adapter_id, adapter_type or "legacy",
+            info.rank, report.verdict.value, report.total_elapsed_ms,
         )
         return adapter_id
+
+    @staticmethod
+    def _peek_manifest(tgsp_path: str) -> Dict[str, Any]:
+        """Read only the manifest from a TGSP file (no weight loading)."""
+        try:
+            with open(tgsp_path, "rb") as f:
+                header = f.read(TGSP_HEADER_LEN)
+                if len(header) < TGSP_HEADER_LEN:
+                    return {}
+                manifest_len = struct.unpack_from("<I", header, 6)[0]
+                manifest_bytes = f.read(manifest_len)
+            return json.loads(manifest_bytes.decode("utf-8"))
+        except Exception:
+            return {}
 
     def _extract_adapter(
         self, tgsp_path: str

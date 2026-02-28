@@ -44,19 +44,32 @@ outputs:
 runs:
   using: "composite"
   steps:
-    - name: Install TG Tinker
+    - name: Install dependencies
       shell: bash
-      run: pip install tg-tinker
+      run: |
+        pip install --upgrade pip
+        pip install -r requirements.txt 2>/dev/null || pip install -r demonstrator/requirements.txt 2>/dev/null || true
 
     - name: Analyze data
       shell: bash
+      env:
+        PYTHONPATH: ${{ github.workspace }}
       run: |
         echo "=== Data Analysis ==="
-        tg-tinker analyze "${{ inputs.data-path }}"
+        python3 -m tensafe.cli.main train --data "${{ inputs.data-path }}" --analyze-only 2>/dev/null || \
+        python3 -c "
+        from tensafe.skills.tg_tinker.data_analyzer import analyze_data
+        result = analyze_data('${{ inputs.data-path }}')
+        print(f'Format: {result.format}')
+        print(f'Examples: {result.num_examples}')
+        print(f'Domain: {result.detected_domain}')
+        "
 
     - name: Create adapter
       shell: bash
       id: create
+      env:
+        PYTHONPATH: ${{ github.workspace }}
       run: |
         ARGS="--data ${{ inputs.data-path }} --name ${{ inputs.name }}"
         ARGS="$ARGS --domain ${{ inputs.domain }}"
@@ -70,8 +83,8 @@ runs:
           ARGS="$ARGS --export ${{ inputs.export-format }}"
         fi
 
-        echo "Running: tg-tinker create $ARGS"
-        RESULT=$(tg-tinker create $ARGS --json)
+        echo "Running: python3 -m tensafe.cli.main train $ARGS"
+        RESULT=$(python3 -m tensafe.cli.main train $ARGS --json)
 
         TGSP_PATH=$(echo "$RESULT" | python3 -c "import sys,json; print(json.load(sys.stdin)['tgsp_path'])")
         QUALITY=$(echo "$RESULT" | python3 -c "import sys,json; print(json.load(sys.stdin)['quality_score'])")
@@ -94,7 +107,7 @@ runs:
         THRESHOLD="${{ inputs.quality-threshold }}"
 
         if python3 -c "exit(0 if float('$QUALITY') >= float('$THRESHOLD') else 1)"; then
-          echo "✓ Quality score $QUALITY >= threshold $THRESHOLD"
+          echo "Quality score $QUALITY >= threshold $THRESHOLD"
         else
           echo "::error::Quality score $QUALITY below threshold $THRESHOLD"
           exit 1
@@ -102,5 +115,7 @@ runs:
 
     - name: Verify created adapter
       shell: bash
+      env:
+        PYTHONPATH: ${{ github.workspace }}
       run: |
-        tensafe verify "${{ steps.create.outputs.tgsp-path }}"
+        python3 -m tensafe.cli.main verify "${{ steps.create.outputs.tgsp-path }}"

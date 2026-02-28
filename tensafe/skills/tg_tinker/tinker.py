@@ -477,8 +477,10 @@ def _stub_evaluate(
         with open(test_path_obj) as f:
             test_count = sum(1 for line in f if line.strip())
 
-    # Simulate a reasonable score based on dataset size
-    simulated_score = min(0.92, 0.75 + (test_count / 1000) * 0.05)
+    # Simulate a reasonable score based on dataset size.
+    # With a 20% test split, 100 total examples -> 20 test examples.
+    # Quality improves with more data (diminishing returns).
+    simulated_score = min(0.95, 0.72 + min(test_count, 200) * 0.004)
     simulated_correct = int(test_count * simulated_score)
 
     logger.info(

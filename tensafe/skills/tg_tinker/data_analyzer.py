@@ -91,8 +91,8 @@ class FileInfo:
 class DataAnalysis:
     """Complete analysis of a data directory or file."""
     data_path: str
-    total_files: int
-    total_size_bytes: int
+    total_files: int = 0
+    total_size_bytes: int = 0
     formats_found: Dict[str, int] = field(default_factory=dict)
     estimated_examples: int = 0
     files: List[FileInfo] = field(default_factory=list)

@@ -34,28 +34,31 @@ outputs:
 runs:
   using: "composite"
   steps:
-    - name: Install TenSafe CLI
+    - name: Install dependencies
       shell: bash
-      run: pip install tensafe-cli
+      run: |
+        pip install --upgrade pip
+        pip install -r requirements.txt 2>/dev/null || pip install -r demonstrator/requirements.txt 2>/dev/null || true
 
     - name: Verify adapters
       shell: bash
       id: verify
+      env:
+        PYTHONPATH: ${{ github.workspace }}
       run: |
         VALID=0
         INVALID=0
-        REPORT="[]"
 
         for tgsp_file in ${{ inputs.adapter }}; do
           echo "Verifying: $tgsp_file"
 
-          RESULT=$(tensafe verify "$tgsp_file" --json 2>&1) || true
+          RESULT=$(python3 -m tensafe.cli.main verify "$tgsp_file" --json 2>&1) || true
 
           if echo "$RESULT" | python3 -c "import sys,json; r=json.load(sys.stdin); sys.exit(0 if r.get('valid') else 1)" 2>/dev/null; then
-            echo "  ✓ VALID"
+            echo "  VALID"
             VALID=$((VALID + 1))
           else
-            echo "  ✗ INVALID"
+            echo "  INVALID"
             INVALID=$((INVALID + 1))
           fi
         done

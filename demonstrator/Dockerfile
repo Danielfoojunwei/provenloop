@@ -62,6 +62,9 @@ RUN pip install --no-cache-dir /tmp/tensafe_he-*.whl && rm -f /tmp/tensafe_he-*.
 # ---- TenSafe platform module (privacy budget, split inference) ----
 COPY tensafe_platform/ /app/tensafe_platform/
 
+# ---- TenSafe core package (runtime, agents, SDK, validation, skills) ----
+COPY tensafe/ /app/tensafe/
+
 # ---- Demonstrator code ----
 COPY demonstrator/ /app/demonstrator/
 

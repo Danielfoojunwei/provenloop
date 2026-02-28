@@ -9,12 +9,17 @@
 # ======================================================================
 # Stage 1: Build tensafe-he Rust CKKS library (PyO3 bindings)
 # This stage is cached independently — only rebuilds when Rust source changes.
+# Use Ubuntu 22.04 base to match runtime stage glibc (2.35).
+# The previous rust:1.80-slim (Debian bookworm, glibc 2.36) produced
+# wheels incompatible with the runtime stage's Ubuntu 22.04.
 # ======================================================================
-FROM rust:1.80-slim AS rust-builder
+FROM ubuntu:22.04 AS rust-builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3-dev python3-pip \
+    curl build-essential python3-dev python3-pip pkg-config \
     && rm -rf /var/lib/apt/lists/*
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.80.0
+ENV PATH="/root/.cargo/bin:${PATH}"
 RUN pip install --no-cache-dir --break-system-packages maturin>=1.0
 
 COPY tensafe-he/ /build/tensafe-he/
@@ -24,8 +29,12 @@ RUN cd /build/tensafe-he/crates/tensafe-he-python \
 
 # ======================================================================
 # Stage 2: Runtime (no Rust toolchain — saves ~1.5GB)
+# Use 'devel' instead of 'runtime' — the tensafe-he-cuda kernels use
+# NVRTC for runtime kernel compilation, which requires nvrtc headers
+# and libcuda stubs only present in the devel image.  Flash Attention
+# and AutoAWQ also need nvcc / CUDA headers for JIT compilation.
 # ======================================================================
-FROM nvidia/cuda:12.1.0-runtime-ubuntu22.04
+FROM nvidia/cuda:12.1.0-devel-ubuntu22.04
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3.11 python3.11-venv python3.11-dev python3-pip \
@@ -67,6 +76,10 @@ ENV PYTHONUNBUFFERED=1
 
 # Server on 8000 (API + frontend)
 EXPOSE 8000
+
+# Health check — model loading can take 30+ seconds so give a long start period
+HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=3 \
+    CMD curl -f http://localhost:8000/health || exit 1
 
 # Default: serve inference with GateLink split enabled
 CMD ["python3", "-m", "uvicorn", "demonstrator.server.app:app", \

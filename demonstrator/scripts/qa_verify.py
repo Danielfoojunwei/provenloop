@@ -96,6 +96,7 @@ def test_moe_config_gatelink():
         and gl.get("client_layers") == 1
         and gl.get("dp_epsilon") == 1.0
         and gl.get("max_lora_rank") == 32
+        and "force_he_in_split_mode" in gl
     )
 
 check("moe_config.json is valid JSON", test_moe_config_valid_json)

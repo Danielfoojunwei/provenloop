@@ -537,6 +537,11 @@ class FinanceInferenceEngine:
         self._split_dp_sigma = 0.0
         self._split_dp_sensitivity = 100.0  # effectively no clipping
 
+        # Split-mode HE enforcement: if True, always use HE even when h_plain
+        # is available. Configurable via gatelink_config.force_he_in_split_mode.
+        glc = self.moe_config.get("gatelink_config", {})
+        self._force_he = glc.get("force_he_in_split_mode", False)
+
         # KV cache store for split inference incremental mode
         self._kv_cache_store = _KVCacheStore(max_sessions=32, ttl_seconds=300.0)
 
@@ -1101,7 +1106,15 @@ class FinanceInferenceEngine:
         # Retain explained variance
         total_var = np.sum(S_c ** 2)
         kept_var = np.sum(S_c[:target_rank] ** 2)
+        discarded_var = np.sum(S_c[target_rank:] ** 2)
         pct = (kept_var / total_var * 100) if total_var > 0 else 100.0
+
+        # Frobenius reconstruction error: ||ΔW - ΔW_k||_F / ||ΔW||_F
+        # By Eckart-Young, this equals sqrt(sum of discarded singular values^2)
+        # divided by sqrt(total singular values^2).
+        frob_total = np.sqrt(total_var) if total_var > 0 else 1.0
+        frob_error = np.sqrt(discarded_var)
+        relative_error = frob_error / frob_total if frob_total > 0 else 0.0
 
         # Split sqrt(singular values) between A and B
         sqrt_s = np.sqrt(S_c[:target_rank])
@@ -1111,9 +1124,19 @@ class FinanceInferenceEngine:
         logger.info(
             f"  {name}: SVD rank {current_rank} → {target_rank}, "
             f"retained {pct:.1f}% variance, "
+            f"Frobenius relative error: {relative_error:.6f} "
+            f"(||ΔW-ΔW_k||/||ΔW|| = {frob_error:.4f}/{frob_total:.4f}), "
             f"HE batches: {math.ceil(current_rank / max(1, 16384 // d_model))} → "
             f"{math.ceil(target_rank / max(1, 16384 // d_model))}"
         )
+
+        if relative_error > 0.05:
+            logger.warning(
+                f"  {name}: SVD truncation discards >{relative_error*100:.1f}% of "
+                f"weight norm — quality may be degraded. Consider increasing "
+                f"target_lora_rank or disabling SVD truncation."
+            )
+
         return A_new.astype(lora_a.dtype), B_new.astype(lora_b.dtype)
 
     @staticmethod
@@ -1231,8 +1254,8 @@ class FinanceInferenceEngine:
         # transformer layers), so computing LoRA in plaintext doesn't
         # reduce privacy.  Skip the entire HE pipeline (~80ms saved).
         # WebSocket mode (h_plain is None) still uses full HE.
-        _force_he = getattr(self, "_force_he", False)
-        if h_plain is not None and not _force_he:
+        # Controlled by gatelink_config.force_he_in_split_mode (default: false).
+        if h_plain is not None and not self._force_he:
             h_np = np.asarray(h_plain, dtype=np.float64).ravel()
             d = lora_a.shape[1]
             h_np = h_np[:d]

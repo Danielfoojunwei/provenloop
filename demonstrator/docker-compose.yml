@@ -8,8 +8,6 @@
 # For phone access:    python relay.py   (separate terminal)
 #                      Phone → http://<WSL-LAN-IP>:9095
 
-version: "3.8"
-
 services:
   tensafe-demo:
     build:

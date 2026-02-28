@@ -23,10 +23,12 @@ jobs:
           pip install -r demonstrator/requirements.txt
 
       - name: Check Python syntax (all .py files compile)
-        run: python -m py_compile demonstrator/server/inference_engine.py
-             && python -m py_compile demonstrator/server/app.py
-             && python -m py_compile demonstrator/server/marketplace.py
-             && python -m py_compile tensafe_platform/split_inference/privacy_budget.py
+        run: |
+          python -m py_compile demonstrator/server/inference_engine.py
+          python -m py_compile demonstrator/server/app.py
+          python -m py_compile demonstrator/server/marketplace.py
+          python -m py_compile demonstrator/server/config.py
+          python -m py_compile tensafe_platform/split_inference/privacy_budget.py
 
       - name: Verify imports resolve
         env:
@@ -55,6 +57,8 @@ jobs:
             ~/.cargo/git
             tensafe-he/target
           key: ${{ runner.os }}-cargo-${{ hashFiles('tensafe-he/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
 
       - name: Build core + CPU crates
         run: cargo build -p tensafe-he-core -p tensafe-he-cpu
@@ -63,7 +67,8 @@ jobs:
         run: cargo test -p tensafe-he-core
 
       - name: Check CUDA crate (syntax only, no GPU)
-        run: cargo check -p tensafe-he-cuda 2>&1 || echo "::warning::tensafe-he-cuda requires CUDA toolkit — skipped on CI"
+        continue-on-error: true
+        run: cargo check -p tensafe-he-cuda
 
   # ── Docker build smoke test ─────────────────────────────────
   docker-build:
@@ -74,6 +79,4 @@ jobs:
       - name: Build Docker image (no GPU required)
         env:
           DOCKER_BUILDKIT: "1"
-        run: |
-          cd demonstrator
-          docker build --no-cache -f Dockerfile -t tensafe-demo:ci ..
+        run: docker build --no-cache -f demonstrator/Dockerfile -t tensafe-demo:ci .

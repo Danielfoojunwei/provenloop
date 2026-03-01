@@ -2,7 +2,7 @@
 import numpy as np, base64, json, urllib.request
 
 from transformers import AutoTokenizer
-tok = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-1.5B", trust_remote_code=True)
+tok = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-1.5B", trust_remote_code=False)
 
 prompt = (
     "<|im_start|>system\n"

@@ -73,7 +73,7 @@ def train_rl(
     sft_dir: str,
     output_dir: str,
     rl_steps: int = 500,
-    rank: int = 32,
+    rank: int = 30,
     alpha: float = 64.0,
     skip_completed: bool = True,
 ) -> dict:
@@ -254,7 +254,7 @@ def main():
     p.add_argument("--sft-dir", default="demonstrator/adapters")
     p.add_argument("--output-dir", default="demonstrator/adapters")
     p.add_argument("--rl-steps", type=int, default=500)
-    p.add_argument("--rank", type=int, default=32)
+    p.add_argument("--rank", type=int, default=30)
     p.add_argument("--alpha", type=float, default=64.0)
     p.add_argument("--no-skip-completed", action="store_true")
     args = p.parse_args()

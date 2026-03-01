@@ -1,0 +1,77 @@
+name: "Verify TGSP Adapter"
+description: "Verify TGSP adapter integrity: signatures, hash, creator identity, LoraConfig, RVUv2 status"
+author: "TenSafe"
+
+inputs:
+  adapter:
+    description: "Path to .tgsp file or glob pattern (e.g., ./adapters/*.tgsp)"
+    required: true
+  fail-on-invalid:
+    description: "Fail the action if any adapter is invalid"
+    required: false
+    default: "true"
+  check-rvu:
+    description: "Verify RVUv2 screening status"
+    required: false
+    default: "true"
+  check-signatures:
+    description: "Verify Ed25519 and Dilithium3 signatures"
+    required: false
+    default: "true"
+  check-hash:
+    description: "Verify SHA-256 payload hash"
+    required: false
+    default: "true"
+
+outputs:
+  valid-count:
+    description: "Number of valid adapters"
+  invalid-count:
+    description: "Number of invalid adapters"
+  report:
+    description: "JSON verification report"
+
+runs:
+  using: "composite"
+  steps:
+    - name: Install dependencies
+      shell: bash
+      run: |
+        pip install --upgrade pip
+        pip install -r requirements.txt 2>/dev/null || pip install -r demonstrator/requirements.txt 2>/dev/null || true
+
+    - name: Verify adapters
+      shell: bash
+      id: verify
+      env:
+        PYTHONPATH: ${{ github.workspace }}
+      run: |
+        VALID=0
+        INVALID=0
+
+        for tgsp_file in ${{ inputs.adapter }}; do
+          echo "Verifying: $tgsp_file"
+
+          RESULT=$(python3 -m tensafe.cli.main verify "$tgsp_file" --json 2>&1) || true
+
+          if echo "$RESULT" | python3 -c "import sys,json; r=json.load(sys.stdin); sys.exit(0 if r.get('valid') else 1)" 2>/dev/null; then
+            echo "  VALID"
+            VALID=$((VALID + 1))
+          else
+            echo "  INVALID"
+            INVALID=$((INVALID + 1))
+          fi
+        done
+
+        echo "valid-count=$VALID" >> "$GITHUB_OUTPUT"
+        echo "invalid-count=$INVALID" >> "$GITHUB_OUTPUT"
+
+        echo ""
+        echo "=== Summary ==="
+        echo "Valid: $VALID"
+        echo "Invalid: $INVALID"
+
+        if [ "${{ inputs.fail-on-invalid }}" = "true" ] && [ "$INVALID" -gt 0 ]; then
+          echo "::error::$INVALID adapter(s) failed verification"
+          exit 1
+        fi

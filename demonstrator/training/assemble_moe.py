@@ -42,7 +42,7 @@ def _extract_lora_to_peft_dir(full_state_path: Path, peft_dir: Path) -> bool:
         state_bytes = f.read()
 
     buffer = io.BytesIO(state_bytes)
-    state = torch.load(buffer, map_location="cpu", weights_only=False)
+    state = torch.load(buffer, map_location="cpu", weights_only=True)
     del state_bytes  # free memory
 
     model_state = state.get("model_state_dict", {})
@@ -50,7 +50,7 @@ def _extract_lora_to_peft_dir(full_state_path: Path, peft_dir: Path) -> bool:
     # Extract only LoRA parameters
     lora_state = {}
     target_modules = set()
-    rank = 32
+    rank = 30
 
     for key, tensor in model_state.items():
         if "lora_" in key.lower():
@@ -78,7 +78,7 @@ def _extract_lora_to_peft_dir(full_state_path: Path, peft_dir: Path) -> bool:
         "peft_type": "LORA",
         "base_model_name_or_path": "Qwen/Qwen2.5-1.5B",
         "r": rank,
-        "lora_alpha": rank * 2,
+        "lora_alpha": 64,  # M6: use explicit alpha (rank*2 gave 60 for rank=30)
         "target_modules": sorted(target_modules),
         "lora_dropout": 0.0,
         "bias": "none",
@@ -133,7 +133,7 @@ def assemble_and_package(adapters_dir: str, output_dir: str) -> dict:
                 metadata={
                     "domain": "finance",
                     "expert_type": name,
-                    "rank": 32,
+                    "rank": 30,
                     "alpha": 64.0,
                     "training": "sft+reinforce",
                 },
@@ -209,7 +209,7 @@ def assemble_and_package(adapters_dir: str, output_dir: str) -> dict:
             "client_layers": 1,
             "dp_epsilon": 1.0,
             "max_epsilon": 10.0,
-            "max_lora_rank": 32,
+            "max_lora_rank": 30,
         },
     }
 

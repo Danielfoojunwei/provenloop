@@ -69,10 +69,43 @@ impl TenSafeRng {
 
     /// Create an RNG seeded from OS entropy (`/dev/urandom` on Linux).
     ///
-    /// Falls back to a time-based seed if `/dev/urandom` is unavailable.
+    /// Reads 32 bytes (256 bits) from `/dev/urandom` and uses them to fill
+    /// all 8 ChaCha20 key words, providing full 256-bit entropy.
+    /// Falls back to `from_seed` with a time-based seed if `/dev/urandom` is unavailable.
     pub fn from_entropy() -> Self {
-        let seed = read_os_entropy();
-        Self::from_seed(seed)
+        let entropy = read_os_entropy();
+
+        // "expand 32-byte k" constant (RFC 8439 §2.3)
+        let mut state = [0u32; 16];
+        state[0] = 0x6170_7865; // "expa"
+        state[1] = 0x3320_646e; // "nd 3"
+        state[2] = 0x7962_2d32; // "2-by"
+        state[3] = 0x6b20_6574; // "te k"
+
+        // Key: fill all 8 words from 32 bytes of OS entropy
+        for i in 0..8 {
+            let offset = i * 4;
+            state[4 + i] = u32::from_le_bytes([
+                entropy[offset],
+                entropy[offset + 1],
+                entropy[offset + 2],
+                entropy[offset + 3],
+            ]);
+        }
+
+        // Counter = 0, Nonce = 0
+        state[12] = 0;
+        state[13] = 0;
+        state[14] = 0;
+        state[15] = 0;
+
+        let mut rng = Self {
+            state,
+            buffer: [0u32; 16],
+            index: 16, // force generation on first use
+        };
+        rng.refill();
+        rng
     }
 
     /// Generate the next ChaCha20 block and reset the buffer index.
@@ -205,19 +238,28 @@ fn quarter_round(s: &mut [u32; 16], a: usize, b: usize, c: usize, d: usize) {
     s[b] = s[b].rotate_left(7);
 }
 
-/// Read 8 bytes from `/dev/urandom` and interpret as u64.
-/// Falls back to a time-based seed on failure.
-fn read_os_entropy() -> u64 {
+/// Read 32 bytes (256 bits) from `/dev/urandom` for full ChaCha20 key entropy.
+/// Falls back to a deterministic-but-unique seed on failure.
+fn read_os_entropy() -> [u8; 32] {
     use std::io::Read;
-    let mut buf = [0u8; 8];
+    let mut buf = [0u8; 32];
     if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
         if f.read_exact(&mut buf).is_ok() {
-            return u64::from_le_bytes(buf);
+            return buf;
         }
     }
-    // Fallback: use the address of a stack variable XOR'd with a constant
-    let fallback = &buf as *const _ as u64;
-    fallback ^ 0xdeadbeef_cafebabe
+    // Fallback: use the address of a stack variable XOR'd with constants
+    // to produce 32 bytes of non-zero (but low-entropy) seed material.
+    let addr = &buf as *const _ as u64;
+    let seed_a = addr ^ 0xdeadbeef_cafebabe;
+    let seed_b = addr.wrapping_mul(0x9e3779b97f4a7c15) ^ 0x517cc1b727220a95;
+    let seed_c = seed_a.wrapping_add(seed_b) ^ 0x6c62272e07bb0142;
+    let seed_d = seed_b.wrapping_mul(seed_a) ^ 0x8eb44a8768581511;
+    buf[0..8].copy_from_slice(&seed_a.to_le_bytes());
+    buf[8..16].copy_from_slice(&seed_b.to_le_bytes());
+    buf[16..24].copy_from_slice(&seed_c.to_le_bytes());
+    buf[24..32].copy_from_slice(&seed_d.to_le_bytes());
+    buf
 }
 
 #[cfg(test)]

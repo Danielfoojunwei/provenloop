@@ -130,6 +130,7 @@ impl GpuRnsPoly {
                         &other.limbs[l],
                         moduli[l].value,
                         moduli[l].barrett_hi,
+                        moduli[l].barrett_lo,
                         self.n as u32,
                     ),
                 )?;
@@ -172,6 +173,7 @@ impl GpuRnsPoly {
                         &other.limbs[l],
                         moduli[l].value,
                         moduli[l].barrett_hi,
+                        moduli[l].barrett_lo,
                         self.n as u32,
                     ),
                 )?;

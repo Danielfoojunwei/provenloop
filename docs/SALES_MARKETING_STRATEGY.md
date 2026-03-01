@@ -882,6 +882,440 @@ FLEXIBLE:    GPU/CPU/FPGA backends, mobile split-inference, multi-expert routing
 
 ---
 
+## 15. Financial Model & Unit Economics
+
+### Revenue Model Assumptions
+
+| Metric | Year 1 | Year 2 | Year 3 |
+|--------|--------|--------|--------|
+| **Community (free)** | 500 orgs | 2,000 orgs | 5,000 orgs |
+| **Professional ($2K/mo)** | 15 customers | 40 customers | 80 customers |
+| **Enterprise ($8-25K/mo)** | 8 customers | 25 customers | 50 customers |
+| **Enterprise Agentic ($25-75K/mo)** | 2 customers | 10 customers | 25 customers |
+| **Custom/OEM** | 1 deal | 3 deals | 5 deals |
+
+### ARR Projections
+
+```
+Year 1:
+  Professional:       15 × $24K avg      = $360K
+  Enterprise:         8  × $180K avg     = $1,440K
+  Enterprise Agentic: 2  × $600K avg     = $1,200K
+  Custom/OEM:         1  × $500K         = $500K
+  ─────────────────────────────────────────────────
+  Total ARR:                               $3.5M
+
+Year 2:
+  Professional:       40 × $24K avg      = $960K
+  Enterprise:         25 × $200K avg     = $5,000K
+  Enterprise Agentic: 10 × $600K avg     = $6,000K
+  Custom/OEM:         3  × $750K avg     = $2,250K
+  ─────────────────────────────────────────────────
+  Total ARR:                               $14.2M
+
+Year 3:
+  Professional:       80 × $24K avg      = $1,920K
+  Enterprise:         50 × $220K avg     = $11,000K
+  Enterprise Agentic: 25 × $650K avg     = $16,250K
+  Custom/OEM:         5  × $1M avg       = $5,000K
+  ─────────────────────────────────────────────────
+  Total ARR:                               $34.2M
+```
+
+### Unit Economics
+
+| Metric | Target | Rationale |
+|--------|--------|-----------|
+| **CAC (Customer Acquisition Cost)** | $15K (Pro), $50K (Enterprise), $80K (Agentic) | Blended across inbound + outbound |
+| **LTV (Lifetime Value)** | $72K (Pro), $540K (Ent), $1.8M (Agentic) | 3-year avg retention × ACV |
+| **LTV:CAC Ratio** | 4.8x (Pro), 10.8x (Ent), 22.5x (Agentic) | >3x healthy; agentic is highly capital-efficient |
+| **Payback Period** | 7 months (Pro), 4 months (Ent), 2 months (Agentic) | Months of ACV to recoup CAC |
+| **Gross Margin** | 75-85% | Compute costs are primary COGS; Groq/GPU infra |
+| **Net Revenue Retention** | 130%+ target | Expansion via higher tiers + more departments |
+| **Logo Churn** | <5% annual | Stickiness from custom adapter training + compliance integration |
+
+### Cost Structure (Year 1)
+
+```
+COGS (Compute + Infrastructure):
+  GPU/Groq inference costs:       $300K-$500K
+  Cloud infrastructure:           $100K-$200K
+  ─────────────────────────────────────────────
+  Total COGS:                     $400K-$700K    (gross margin ~80%)
+
+Operating Expenses:
+  Engineering (8-10 FTEs):        $1.5M-$2.0M
+  Sales & Marketing (5-7 FTEs):   $800K-$1.2M
+  G&A:                            $200K-$300K
+  ─────────────────────────────────────────────
+  Total OpEx:                     $2.5M-$3.5M
+
+Total Burn:                       $2.9M-$4.2M
+Cash Runway Needed (18 months):   $4.4M-$6.3M
+```
+
+### Fundraising Milestones
+
+| Round | Timing | Amount | Use of Funds | Key Milestone to Unlock |
+|-------|--------|--------|-------------|------------------------|
+| **Seed** | Now | $3M-$5M | Hire GTM team, Groq PoC, first 5 design partners | Working product + 7.4 tok/s benchmark |
+| **Series A** | Month 18-24 | $15M-$25M | Scale sales, FPGA development, international | $3M+ ARR, Groq partnership live, 90+ tok/s FPGA demo |
+| **Series B** | Month 36-42 | $40M-$60M | Global expansion, platform, agentic tier at scale | $15M+ ARR, 30+ enterprise customers, OEM revenue |
+
+---
+
+## 16. Government & Defense Vertical Playbook
+
+### Overview
+
+Government and defense represents TenSafe's highest-value vertical ($500K-$5M ARR per deal) with the longest sales cycles (9-18 months). These buyers have the most urgent need for encrypted AI — classified data, sovereign AI mandates, and zero-trust architectures.
+
+### Target Roles & Agencies
+
+**Roles:**
+- Chief Information Officer (CIO) / Chief Data Officer (CDO)
+- Chief Information Security Officer (CISO)
+- Program Managers (for specific AI modernization programs)
+- Authorizing Officials (ATO process)
+
+**Priority Agencies / Programs:**
+| Agency/Program | AI Use Case | Why TenSafe |
+|---------------|-------------|-------------|
+| **DoD / CDAO (Chief Digital & AI Office)** | Classified document analysis, logistics optimization | Encrypted inference on classified networks without cross-domain solutions |
+| **Intelligence Community (IC)** | OSINT analysis, foreign language processing | Process sensitive intelligence without exposing to AI vendor |
+| **VA (Veterans Affairs)** | Patient triage, benefits processing | HIPAA + federal data protection for 9M+ veterans |
+| **DHS / CISA** | Threat intelligence, incident response | Process threat data without exposure to AI servers |
+| **Five Eyes Allies** | Shared intelligence AI | Encrypted inference preserves classification levels across partner nations |
+| **State/Local Government** | Constituent services, fraud detection | PII protection for taxpayer data |
+
+### Regulatory & Compliance Landscape
+
+| Framework | Relevance | TenSafe Alignment |
+|-----------|-----------|-------------------|
+| **FedRAMP** | Required for cloud services to federal agencies | TenSafe can deploy in FedRAMP-authorized environments; encryption adds defense-in-depth |
+| **FISMA** | Federal information security requirements | CKKS provides NIST-standard cryptographic controls |
+| **NIST 800-53** | Security control catalog | Maps to AC, SC, and IA control families |
+| **NIST AI RMF** | AI risk management framework | TenSafe aligns with Govern, Map, Measure, Manage functions |
+| **CMMC** | DoD supply chain cybersecurity | Level 3+ encryption requirements met by design |
+| **ITAR / EAR** | Export controls on defense technology | On-prem deployment available; no data crosses borders |
+| **Zero Trust Architecture (ZTA)** | Federal mandate (EO 14028) | TenSafe implements "never trust, always verify" at the computation level |
+
+### Sales Approach
+
+**Entry strategy:** Partner with defense systems integrators (SIs) who already have clearances and contracts.
+
+**Priority SI Partners:**
+| Partner | Why | Approach |
+|---------|-----|----------|
+| **Booz Allen Hamilton** | AI/ML practice, CDAO contracts | Technology partnership for encrypted AI offerings |
+| **Palantir** | Data platforms for IC/DoD | OEM integration — TenSafe as privacy layer for Foundry/Gotham |
+| **Leidos / SAIC** | Large IT modernization contracts | Subcontract vehicle for AI privacy requirements |
+| **Anduril** | Defense technology, fast-moving culture | Joint R&D on encrypted edge AI |
+| **Microsoft (Azure Government)** | FedRAMP High cloud, DoD IL5/IL6 | Managed TenSafe service in Azure Government |
+
+**Contract vehicles:** GSA Schedule, SEWP V, CIO-SP3, IDIQ task orders via SI partners
+
+### Gov/Defense-Specific Messaging
+
+> "Zero-trust AI for classified workflows. TenSafe ensures your AI infrastructure cannot be compromised even if the server is — because the server never sees the data. Not through access controls, but through NIST-standard mathematics."
+
+**Key differentiators for government:**
+- **Air-gapped deployment:** Full on-prem, no internet required
+- **NIST-standard cryptography:** CKKS is based on Ring-LWE, a lattice problem with NIST backing
+- **Post-quantum ready:** Dilithium3 signatures on adapter packages (NIST PQC standard)
+- **Sovereign AI:** No data leaves national jurisdiction, no foreign vendor access
+- **Audit trail:** Every encrypted computation logged with privacy budget accounting
+
+### Gov/Defense Objection Handling
+
+| Objection | Response |
+|-----------|----------|
+| "We need FedRAMP authorization" | "TenSafe deploys within your existing FedRAMP-authorized infrastructure. The encryption layer adds controls, it doesn't require a separate authorization boundary." |
+| "Our data is classified — it can't touch any AI" | "That's exactly the problem we solve. TenSafe encrypts the computation itself. The AI processes your data without ever seeing it in plaintext. It's the equivalent of a human analyst who can answer questions about a document they can't read." |
+| "We need FIPS 140-2/3 validated crypto" | "TenSafe's CKKS implementation uses NIST-standard parameters. We're pursuing FIPS validation for the CuKKS library and can deploy with FIPS-validated transport encryption today." |
+| "ATO process takes 12+ months" | "We work with your AO to develop the security package. TenSafe actually simplifies ATO because it reduces the data exposure risk — encrypted computation means fewer controls needed at the data layer." |
+| "Budget cycles are rigid" | "We align with your PPBE cycle. Our PoC program fits within O&M funding, and production contracts can be structured as IDIQ task orders through existing vehicles." |
+
+---
+
+## 17. Customer Success & Retention Strategy
+
+### Customer Lifecycle
+
+```
+ONBOARDING (Weeks 1-4)
+  │  Dedicated CS engineer assigned
+  │  Environment setup + adapter training
+  │  Integration testing + performance benchmarking
+  │  Success criteria defined and baselined
+  │
+ACTIVATION (Weeks 4-8)
+  │  Production deployment
+  │  First encrypted queries processed
+  │  Monitoring dashboards configured
+  │  Team training completed
+  │
+VALUE REALIZATION (Months 2-6)
+  │  Monthly business reviews
+  │  Usage analytics shared with champion
+  │  First ROI metrics captured
+  │  Case study opportunity identified
+  │
+EXPANSION (Months 6+)
+  │  New use cases / departments identified
+  │  Tier upgrade discussions (Pro → Enterprise → Agentic)
+  │  Additional adapter training for new domains
+  │  Reference customer program
+  │
+RENEWAL (Annual)
+     Health score review
+     Value delivered vs invested
+     Multi-year discount offered for commitment
+     Executive sponsor engagement
+```
+
+### Health Scoring
+
+| Signal | Weight | Green | Yellow | Red |
+|--------|--------|-------|--------|-----|
+| **Query volume trend** | 25% | Growing month-over-month | Flat | Declining |
+| **Feature adoption** | 20% | Using MoE + split protocol | Single adapter only | Basic queries only |
+| **Support tickets** | 15% | <2/month, resolved quickly | 3-5/month | 6+/month or unresolved |
+| **Champion engagement** | 20% | Monthly calls, responsive | Quarterly calls | Unresponsive |
+| **NPS score** | 10% | 9-10 (Promoter) | 7-8 (Passive) | 0-6 (Detractor) |
+| **Compliance utilization** | 10% | Using audit logs + DP tracking | Partial | Not using compliance features |
+
+**Escalation triggers:**
+- Health score drops below 60 → CS Manager + AE joint review
+- Health score drops below 40 → VP CS + CRO executive outreach
+- No queries for 14+ days → Immediate outreach from CS engineer
+
+### Expansion Playbook
+
+| Current Tier | Expansion Path | Trigger | Talk Track |
+|-------------|---------------|---------|------------|
+| Professional | → Enterprise | >80% capacity, compliance team engaged | "You're hitting the ceiling on Professional. Enterprise unlocks GateLink-Split, signed adapters, and compliance documentation your CISO needs." |
+| Enterprise | → Enterprise Agentic | Building multi-step workflows, model size needs | "Your team is chaining 5+ API calls per workflow. On Groq-powered Agentic tier, that drops from minutes to seconds — with encryption on every step." |
+| Single department | → Multi-department | Successful PoC generating internal buzz | "Legal team is seeing 3x faster document review. Your compliance team faces the same privacy challenge — should we run a pilot?" |
+| Single adapter | → Multi-expert MoE | Multiple domain use cases emerging | "You're training separate adapters for lending and investments. CryptoMOE routes between them automatically — no additional HE overhead." |
+
+### Renewal Incentives
+
+| Contract Length | Discount | Additional Benefits |
+|----------------|----------|-------------------|
+| 1-year | Standard pricing | — |
+| 2-year | 10% discount | Priority feature requests, quarterly exec briefing |
+| 3-year | 15% discount | Dedicated SE, custom adapter training included, early access to Groq tier |
+
+---
+
+## 18. Sales Enablement Materials
+
+### Collateral Catalog
+
+| Asset | Audience | Format | Priority |
+|-------|----------|--------|----------|
+| **One-pager: "TenSafe Overview"** | All | PDF, 1 page | P0 |
+| **Technical whitepaper: ZeRo-MOAI** | CTOs, ML Engineers | PDF, 10 pages | P0 |
+| **ROI Calculator (interactive)** | CFOs, Business Leaders | Web tool / spreadsheet | P0 |
+| **Demo environment (hosted)** | All technical | Live web app | P0 |
+| **Security architecture document** | CISOs | PDF, 15 pages | P0 |
+| **Compliance mapping: HIPAA** | Healthcare CCOs | PDF, 5 pages | P1 |
+| **Compliance mapping: PCI-DSS** | Finance CCOs | PDF, 5 pages | P1 |
+| **Compliance mapping: GDPR** | EU prospects | PDF, 5 pages | P1 |
+| **Case study template** | All | PDF, 2 pages | P1 |
+| **Battlecard: vs TEEs** | Sales reps | Internal, 1 page | P1 |
+| **Battlecard: vs Data Masking** | Sales reps | Internal, 1 page | P1 |
+| **Battlecard: vs On-Prem Isolation** | Sales reps | Internal, 1 page | P1 |
+| **Executive presentation deck** | C-suite | PowerPoint, 15 slides | P0 |
+| **Integration guide** | DevOps, ML Engineers | Docs site | P1 |
+| **Pricing calculator** | AEs | Internal spreadsheet | P0 |
+| **PoC proposal template** | AEs + SEs | Word/Google Doc | P0 |
+| **Mutual evaluation plan (MEP)** | AEs | Word/Google Doc | P1 |
+
+### Battlecard Structure (Template)
+
+```
+COMPETITOR: [Name]
+──────────────────────────────────
+THEIR PITCH:
+  [What they tell prospects]
+
+THEIR WEAKNESS:
+  [Technical/business limitation]
+
+OUR COUNTER:
+  [Specific response with proof points]
+
+LANDMINES TO SET:
+  [Questions to ask in discovery that expose competitor weakness]
+  1. "Ask them to demonstrate real-time encrypted inference — what tok/s?"
+  2. "Ask them about side-channel attack resistance (for TEE vendors)"
+  3. "Ask if their approach preserves data utility — or degrades AI quality"
+
+WIN STORY:
+  [Brief anecdote of winning against this competitor]
+```
+
+### Sales Training Program
+
+| Module | Duration | Content |
+|--------|----------|---------|
+| **TenSafe Fundamentals** | 2 hours | Product overview, architecture, demo walkthrough |
+| **Homomorphic Encryption for Sales** | 1.5 hours | CKKS explained without math; analogies for prospects |
+| **Discovery Mastery** | 2 hours | Pain-based selling, qualification framework (MEDDPICC) |
+| **Demo Certification** | 3 hours | Hands-on demo delivery, Q&A handling |
+| **Vertical Deep-Dives** | 1 hour each | Finance, healthcare, legal, government — regulations + use cases |
+| **Competitive Intelligence** | 1.5 hours | Battlecards, objection handling, competitive positioning |
+| **Pricing & Packaging** | 1 hour | Tier selection, discount authority, deal structuring |
+| **PoC Execution** | 2 hours | Scoping, success criteria, handoff to SE, PoC-to-close |
+
+---
+
+## 19. Open-Source Community Growth Strategy
+
+### Philosophy
+
+Open-source is TenSafe's **demand generation engine**, not a charity. The community edition builds trust, adoption, and a talent pipeline that feeds the commercial flywheel.
+
+```
+Open Source → Adoption → Trust → Enterprise Conversations → Revenue
+     ↑                                                         │
+     └─────── Community feedback improves product ─────────────┘
+```
+
+### Open-Source vs Commercial Boundary
+
+| Capability | Community (Free) | Commercial |
+|-----------|-----------------|------------|
+| Core HE inference engine | Yes | Yes |
+| CPU backend (Pyfhel) | Yes | Yes |
+| Single LoRA adapter | Yes | Yes |
+| Basic differential privacy | Yes | Yes |
+| Documentation + tutorials | Yes | Yes |
+| GPU acceleration (CuKKS) | No | Yes |
+| Multi-expert CryptoMOE | No | Yes |
+| GateLink-Split protocol | No | Yes |
+| TGSP signed adapters | No | Yes |
+| SLA + support | No | Yes |
+| Compliance documentation | No | Yes |
+| Groq integration | No | Yes |
+
+### Community Growth Tactics
+
+**Phase 1: Launch (Months 1-3)**
+- Clean up repo: README, quick-start guide, contributing.md, code of conduct
+- Launch on Hacker News, Reddit (r/MachineLearning, r/crypto, r/netsec)
+- Submit to Awesome lists (awesome-homomorphic-encryption, awesome-privacy)
+- Create a Discord server with channels: #general, #help, #showcase, #contributing
+- Publish 2 blog posts explaining the core innovations accessibly
+
+**Phase 2: Momentum (Months 3-6)**
+- Monthly community calls (recorded, published on YouTube)
+- "Good first issue" labels for newcomers
+- Bounty program for high-impact contributions ($500-$5,000)
+- Conference talks accepted and delivered
+- Integration examples: TenSafe + LangChain, TenSafe + HuggingFace
+- Aim: 5,000 GitHub stars, 200 Discord members
+
+**Phase 3: Ecosystem (Months 6-12)**
+- Third-party adapter marketplace (community-trained TGSP packages)
+- University partnerships for research projects
+- Student ambassador program
+- Annual "TenSafe Summit" (virtual, Year 1; hybrid, Year 2)
+- Aim: 10,000 GitHub stars, 500 Discord members, 10+ community adapters
+
+### Contributor Funnel
+
+```
+Star the repo → Join Discord → File an issue → Submit a PR → Become maintainer
+     │              │               │               │              │
+  10,000         500 members      100 issues      30 PRs         5 maintainers
+  (Year 1)      (Year 1)         (Year 1)        (Year 1)       (Year 2)
+```
+
+### Developer Advocate Role
+
+The Developer Advocate is the bridge between community and product:
+- Writes 2 technical blog posts per month
+- Responds to community questions within 24 hours
+- Maintains integration examples and tutorials
+- Presents at 6+ conferences per year
+- Reports community feedback to product team weekly
+- Manages the bounty program and contributor recognition
+
+---
+
+## 20. International Expansion Strategy
+
+### Phase 1: EU / EEA (Months 6-12)
+
+**Why EU first:**
+- GDPR creates the strongest regulatory tailwind globally
+- EU AI Act (effective August 2025) adds new compliance requirements for AI systems
+- Large addressable market: €400B+ financial services, €300B+ healthcare
+- English-speaking entry points: Ireland, Netherlands, Nordics
+
+**Market Entry:**
+| Approach | Detail |
+|----------|--------|
+| **Legal entity** | Establish EU subsidiary (Ireland — tax-efficient, English-speaking, tech hub) |
+| **Data residency** | Deploy in EU cloud regions (AWS eu-west-1, Azure West Europe) |
+| **Compliance** | GDPR mapping document, EU AI Act compliance, local DPA engagement |
+| **Hiring** | 1 enterprise AE (London/Dublin), 1 SE (EU-based) |
+| **Partnerships** | Local SIs: Capgemini, Atos, Sopra Steria |
+
+**GDPR-Specific Messaging:**
+> "GDPR Article 25 requires data protection by design. TenSafe doesn't just comply with GDPR — it makes GDPR irrelevant for AI workloads, because the AI server provably never processes personal data in plaintext."
+
+**Key EU use cases:**
+- Cross-border AI: Process data from multiple EU member states without transfer concerns
+- Right to be forgotten: Encrypted queries leave no plaintext trace on servers
+- DPIA simplification: Homomorphic encryption fundamentally changes the risk profile
+
+### Phase 2: Asia-Pacific (Months 12-18)
+
+**Priority markets:**
+
+| Market | Regulation | Opportunity |
+|--------|-----------|-------------|
+| **Singapore** | PDPA, MAS guidelines | Financial hub, AI-forward government, English-speaking |
+| **Japan** | APPI (amended 2022) | Large enterprise market, privacy-conscious culture |
+| **Australia** | Privacy Act, CDR | Financial services, healthcare, government |
+| **South Korea** | PIPA | Samsung/LG ecosystem, aggressive AI adoption |
+
+**Entry approach:** Partner-led. Work with regional SIs (NTT Data, Infosys, TCS) and cloud providers (AWS Asia, Azure Asia).
+
+### Phase 3: Middle East & Emerging (Months 18-24)
+
+| Market | Opportunity |
+|--------|------------|
+| **UAE / Saudi Arabia** | Sovereign AI mandates, massive AI investment (NEOM, PIF), Arabic language AI |
+| **India** | DPDP Act (2023), huge financial services market, cost-sensitive (Professional tier) |
+| **Brazil** | LGPD (similar to GDPR), large banking sector |
+
+### International Pricing Adjustments
+
+| Region | Adjustment | Rationale |
+|--------|-----------|-----------|
+| EU / UK | Standard pricing (EUR) | Comparable purchasing power, strong regulatory driver |
+| Japan / Australia / Singapore | Standard pricing (local currency) | Premium markets |
+| India / Brazil / SEA | 30-40% discount on Professional tier | Market development pricing, lower cost of alternatives |
+| Middle East | Premium pricing (10-20% above standard) | Sovereign AI premium, high willingness to pay |
+| Government (any region) | Custom | Contract vehicle dependent |
+
+### Localization Requirements
+
+| Element | EU (Phase 1) | APAC (Phase 2) |
+|---------|-------------|-----------------|
+| Documentation | English (sufficient) | English + Japanese |
+| Sales materials | English + French + German | English + Japanese + Korean |
+| Support | English (24/5) | English + Japanese (business hours) |
+| Legal/compliance | GDPR, EU AI Act, local DPA | PDPA, APPI, Privacy Act |
+| Data residency | EU cloud regions | Regional cloud regions |
+
+---
+
 ## Sources
 
 - [Groq LPU Tops Latency & Throughput in Benchmark](https://groq.com/blog/artificialanalysis-ai-llm-benchmark-doubles-axis-to-fit-new-groq-lpu-inference-engine-performance-results)

@@ -1,0 +1,112 @@
+# TenSafe Runtime Helm Chart Values
+# https://tensafe.io
+
+# License key (required for enterprise deployment)
+license:
+  key: ""
+
+# Runtime configuration
+runtime:
+  replicas: 1
+  metering: true
+  maxConcurrentInferences: 100
+
+# GPU configuration
+gpu:
+  enabled: true
+  type: "a100"  # a100, a2000, h100, l40s
+  count: 1
+
+# Security settings
+security:
+  pqc: true                    # Enable post-quantum crypto (ML-KEM-768 + ML-DSA-65)
+  fips: false                  # Enable FIPS 140-3 mode (requires validated module)
+  tlsVersion: "1.3"
+
+# Compliance mode flags
+compliance:
+  hipaa: false                 # Enable HIPAA controls (PHI handling, BAA enforcement)
+  soc2: false                  # Enable SOC 2 audit logging
+  fedramp: false               # Enable FedRAMP controls
+  gdpr: false                  # Enable GDPR controls (data residency, right-to-erasure)
+  pciDss: false                # Enable PCI DSS controls
+
+# Agentic AI settings
+agents:
+  enabled: true
+  selfImprovement: true        # Allow agents to create improved adapters
+  maxConcurrent: 50            # Max concurrent agent instances
+  swapRedTeam: true            # REQUIRED: red-team every adapter swap
+  swapApproval: "meta_agent"   # "meta_agent" or "human_in_loop"
+
+# Multi-tenant settings
+multiTenant:
+  enabled: true
+  maxTenants: 100
+  isolationLevel: "gpu_context"  # gpu_context, namespace, node
+
+# TGSP adapter settings
+tgsp:
+  validation: true             # Require TenSafe Validated badge for loading
+  loadGate:
+    hashVerification: true
+    signatureVerification: true
+    creatorVerification: true
+    loraConfigValidation: true
+    sparseMoeCheck: true
+    rvuScreening: true         # Run RVUv2 at every load
+
+# Differential Privacy
+dp:
+  enabled: true
+  maxEpsilon: 10.0             # Maximum ε per session
+  blockOnExhaustion: true      # Block inference when budget exhausted
+
+# Observability
+monitoring:
+  prometheus: true
+  metricsPort: 9090
+  complianceDashboard: true
+  dashboardPort: 8080
+
+# Docker image
+image:
+  repository: tensafe/tensafe-runtime
+  tag: "1.0.0"
+  pullPolicy: IfNotPresent
+
+# Resource limits
+resources:
+  limits:
+    cpu: "8"
+    memory: "32Gi"
+    nvidia.com/gpu: "1"
+  requests:
+    cpu: "4"
+    memory: "16Gi"
+    nvidia.com/gpu: "1"
+
+# Persistence
+persistence:
+  enabled: true
+  size: 100Gi
+  storageClass: ""
+
+# Authentication
+auth:
+  sso:
+    enabled: false
+    provider: ""               # okta, azure_ad, auth0
+    issuerUrl: ""
+    clientId: ""
+
+# Networking
+service:
+  type: ClusterIP
+  port: 8000
+
+ingress:
+  enabled: false
+  className: ""
+  host: ""
+  tls: false

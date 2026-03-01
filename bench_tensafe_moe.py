@@ -25,7 +25,7 @@ except ImportError as e:
 
 # Constants
 MODEL_ID = "Qwen/Qwen1.5-MoE-A2.7B"
-RANK = 32
+RANK = 30
 ALPHA = 8  # User's k=8
 DEVICE = "cuda"
 
@@ -38,12 +38,12 @@ def setup_model():
         bnb_4bit_use_double_quant=True
     )
     
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, trust_remote_code=True)
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, trust_remote_code=False)
     model = AutoModelForCausalLM.from_pretrained(
         MODEL_ID,
         quantization_config=bnb_config,
         device_map="auto",
-        trust_remote_code=True
+        trust_remote_code=False
     )
     
     # Configure LoRA targeting both attention and MoE projections

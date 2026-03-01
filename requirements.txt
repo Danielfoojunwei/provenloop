@@ -1,26 +1,24 @@
 # TenSafe — GPU-accelerated HE-LoRA inference server
 # Install: pip install -r requirements.txt
-# Requires: CUDA 12.8+ GPU, Python 3.12+
+# Requires: CUDA 12.1+ GPU, Python 3.11+
 
 # ── Core ML ───────────────────────────────────────────────────
-torch>=2.6.0
-transformers>=4.45.0
-flash-attn>=2.0                  # Flash Attention v2 (optional, falls back to SDPA)
-autoawq>=0.2.0                   # AWQ INT4 quantization (optional, set TENSAFE_AWQ=1)
+torch>=2.2.0,<2.7.0                # M11: CUDA 12.1 compat (2.7+ may require CUDA 12.4)
+transformers>=4.45.0,<4.50.0
+flash-attn>=2.0                    # Flash Attention v2 (optional, falls back to SDPA)
+autoawq>=0.2.0                     # AWQ INT4 quantization (optional, set TENSAFE_AWQ=1)
 
 # ── Homomorphic Encryption ────────────────────────────────────
 # tensafe-he: native Rust CKKS via PyO3 (preferred, zero external deps)
 # Build: cd tensafe-he/crates/tensafe-he-python && maturin develop --release
-# cukks>=0.1.2                # CuKKS CKKS wrapper (legacy fallback 1, replaced by tensafe-he)
-# Pyfhel>=3.5.0               # CPU fallback CKKS backend (legacy fallback 2, replaced by tensafe-he)
 
 # ── Server ────────────────────────────────────────────────────
-fastapi>=0.100.0
-uvicorn>=0.30.0
-websockets>=12.0
-pydantic>=2.0.0
-pydantic-settings>=2.0.0
+fastapi>=0.100.0,<1.0.0
+uvicorn>=0.30.0,<1.0.0
+websockets>=12.0,<14.0
+pydantic>=2.0.0,<3.0.0
+pydantic-settings>=2.0.0,<3.0.0
 
 # ── Utilities ─────────────────────────────────────────────────
-numpy>=2.0.0
-requests>=2.31.0
+numpy>=1.26.0,<3.0.0
+requests>=2.31.0,<3.0.0

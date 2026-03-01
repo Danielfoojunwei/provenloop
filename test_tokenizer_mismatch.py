@@ -4,7 +4,7 @@ os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
 os.environ["TQDM_DISABLE"] = "1"
 
 from transformers import AutoTokenizer
-hf_tok = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-1.5B", trust_remote_code=True)
+hf_tok = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-1.5B", trust_remote_code=False)
 
 # Load JS tokenizer data
 with open("demonstrator/frontend/weights/tokenizer.json") as f:

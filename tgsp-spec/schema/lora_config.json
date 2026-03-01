@@ -1,0 +1,88 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tensafe.dev/tgsp/lora_config.json",
+  "title": "TGSP LoRA Configuration",
+  "description": "JSON Schema for the LoRA configuration block within a TGSP manifest.",
+  "type": "object",
+  "required": [
+    "rank",
+    "alpha",
+    "target_modules",
+    "lora_dropout",
+    "bias",
+    "task_type",
+    "simd_slots",
+    "cols_per_ct",
+    "batches"
+  ],
+  "properties": {
+    "rank": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1024,
+      "default": 30,
+      "description": "LoRA rank (r). Controls the dimensionality of the low-rank decomposition."
+    },
+    "alpha": {
+      "type": "number",
+      "minimum": 0,
+      "exclusiveMinimum": true,
+      "default": 64,
+      "description": "LoRA scaling factor (alpha). The effective scaling is alpha/rank."
+    },
+    "target_modules": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "minItems": 1,
+      "uniqueItems": true,
+      "description": "List of module names in the base model to apply LoRA adaptation to (e.g. 'q_proj', 'v_proj', 'gate')."
+    },
+    "lora_dropout": {
+      "type": "number",
+      "minimum": 0.0,
+      "maximum": 1.0,
+      "default": 0.0,
+      "description": "Dropout probability applied to LoRA layers during training."
+    },
+    "bias": {
+      "type": "string",
+      "enum": ["none", "all", "lora_only"],
+      "default": "none",
+      "description": "Bias handling strategy. 'none' = no bias, 'all' = train all biases, 'lora_only' = only LoRA biases."
+    },
+    "task_type": {
+      "type": "string",
+      "enum": [
+        "CAUSAL_LM",
+        "SEQ_2_SEQ_LM",
+        "TOKEN_CLS",
+        "SEQ_CLS",
+        "QUESTION_ANS",
+        "FEATURE_EXTRACTION"
+      ],
+      "description": "PEFT task type that determines the model head and loss function."
+    },
+    "simd_slots": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 8192,
+      "description": "Number of SIMD slots for FHE (Fully Homomorphic Encryption) operations."
+    },
+    "cols_per_ct": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 5,
+      "description": "Number of matrix columns packed per ciphertext in FHE encoding."
+    },
+    "batches": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 6,
+      "description": "Number of FHE batches for parallel encrypted inference."
+    }
+  },
+  "additionalProperties": false
+}

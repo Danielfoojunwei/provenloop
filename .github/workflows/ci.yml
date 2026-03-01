@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, 'claude/**']
   pull_request:
     branches: [main]
 
@@ -23,18 +23,46 @@ jobs:
           pip install -r demonstrator/requirements.txt
 
       - name: Check Python syntax (all .py files compile)
-        run: python -m py_compile demonstrator/server/inference_engine.py
-             && python -m py_compile demonstrator/server/app.py
-             && python -m py_compile demonstrator/server/marketplace.py
-             && python -m py_compile tensafe_platform/split_inference/privacy_budget.py
+        run: |
+          python -m py_compile demonstrator/server/inference_engine.py
+          python -m py_compile demonstrator/server/app.py
+          python -m py_compile demonstrator/server/marketplace.py
+          python -m py_compile tensafe_platform/split_inference/privacy_budget.py
+          # TenSafe core package
+          find tensafe/ -name '*.py' -exec python -m py_compile {} +
 
       - name: Verify imports resolve
         env:
           PYTHONPATH: ${{ github.workspace }}
         run: |
+          # Demonstrator
           python -c "from demonstrator.server.inference_engine import FinanceInferenceEngine; print('inference_engine OK')"
           python -c "from demonstrator.server.marketplace import AdapterMarketplace; print('marketplace OK')"
           python -c "from tensafe_platform.split_inference.privacy_budget import PrivacyBudgetTracker; print('privacy_budget OK')"
+          # TenSafe runtime
+          python -c "from tensafe.runtime import TenSafeRuntime, RuntimeConfig; print('runtime OK')"
+          python -c "from tensafe.runtime.load_gate import TGSPLoadGate; print('load_gate OK')"
+          python -c "from tensafe.runtime.metering import MeteringService; print('metering OK')"
+          # TenSafe agents
+          python -c "from tensafe.agents import MetaAgent; print('meta_agent OK')"
+          python -c "from tensafe.agents.hot_swap import HotSwapManager; print('hot_swap OK')"
+          python -c "from tensafe.agents.self_improve import SelfImproveLoop; print('self_improve OK')"
+          # TenSafe SDK
+          python -c "from tensafe.sdk.tgsp_builder import TGSPBuilder; print('tgsp_builder OK')"
+          python -c "from tensafe.sdk.tgsp_adapter import TGSPAdapter; print('tgsp_adapter OK')"
+          # TenSafe validation
+          python -c "from tensafe.validation import ValidationService; print('validation OK')"
+          # TG Tinker skill
+          python -c "from tensafe.skills.tg_tinker import TGTinker, analyze_data; print('tg_tinker OK')"
+          python -c "from tensafe.skills.tg_tinker.export import read_tgsp, verify_tgsp; print('tg_tinker.export OK')"
+          # CLI
+          python -c "from tensafe.cli.main import main; print('cli OK')"
+
+      - name: Smoke-test TenSafe CLI
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+        run: |
+          python -m tensafe.cli.main --help
 
   # ── Rust workspace ──────────────────────────────────────────
   rust-check:
@@ -68,8 +96,15 @@ jobs:
   # ── Docker build smoke test ─────────────────────────────────
   docker-build:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+
+      - name: Free disk space for large Docker build
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /usr/local/share/powershell /usr/share/swift /opt/hostedtoolcache
+          df -h /
 
       - name: Build Docker image (no GPU required)
         env:

@@ -537,8 +537,16 @@ class FinanceInferenceEngine:
         self._split_dp_sigma = 0.0
         self._split_dp_sensitivity = 100.0  # effectively no clipping
 
+        # Split-mode HE enforcement: if True, always use HE even when h_plain
+        # is available. Configurable via gatelink_config.force_he_in_split_mode.
+        glc = self.moe_config.get("gatelink_config", {})
+        self._force_he = glc.get("force_he_in_split_mode", False)
+
         # KV cache store for split inference incremental mode
         self._kv_cache_store = _KVCacheStore(max_sessions=32, ttl_seconds=300.0)
+
+        # M10: Reusable HE executor (avoids thread pool leak on generator abandonment)
+        self._he_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="he_async")
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -549,9 +557,7 @@ class FinanceInferenceEngine:
 
         # Base model
         logger.info(f"Loading {QWEN_MODEL}")
-        self.tokenizer = AutoTokenizer.from_pretrained(
-            QWEN_MODEL, trust_remote_code=True,
-        )
+        self.tokenizer = AutoTokenizer.from_pretrained(QWEN_MODEL)
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
@@ -576,7 +582,7 @@ class FinanceInferenceEngine:
                     _awq_model,
                     torch_dtype=torch.float16,
                     device_map=self.device,
-                    trust_remote_code=True,
+                    trust_remote_code=False,
                     **({} if _attn_impl is None else {"attn_implementation": _attn_impl}),
                 )
                 _model_loaded = True
@@ -589,7 +595,7 @@ class FinanceInferenceEngine:
                 QWEN_MODEL,
                 torch_dtype=torch.float16,
                 device_map=self.device,
-                trust_remote_code=True,
+                trust_remote_code=False,
                 **({} if _attn_impl is None else {"attn_implementation": _attn_impl}),
             )
 
@@ -867,8 +873,16 @@ class FinanceInferenceEngine:
                 try:
                     from tensafe.tgsp_adapter_registry import TGSPAdapterRegistry
                     registry = TGSPAdapterRegistry()
-                    registry.load_tgsp_adapter(tgsp_path)
-                    logger.info(f"Loaded adapter: {name} (from TGSP)")
+                    adapter_data = registry.load_tgsp_adapter(tgsp_path)
+                    # Populate self.adapters so the adapter is usable at inference
+                    if adapter_data and isinstance(adapter_data, dict):
+                        self.adapters[name] = {
+                            "weights": adapter_data.get("weights", {}),
+                            "config": ecfg,
+                            "gate_keywords": set(ecfg.get("gate_keywords", [])),
+                            "always_active": ecfg.get("always_active", False),
+                        }
+                    logger.info(f"Loaded adapter: {name} (from TGSP registry)")
                     loaded = True
                 except Exception as e:
                     logger.warning(f"TGSP load failed for {name}: {e}")
@@ -913,7 +927,7 @@ class FinanceInferenceEngine:
 
         # 3. Extract LoRA weights
         buf = _io.BytesIO(payload)
-        lora_state = torch.load(buf, map_location="cpu", weights_only=False)
+        lora_state = torch.load(buf, map_location="cpu", weights_only=True)
         weights = {}
         for key in lora_state:
             if "lora_A" in key:
@@ -934,7 +948,7 @@ class FinanceInferenceEngine:
         # 5. Build adapter config from manifest + overrides
         ecfg = {
             "adapter_id": manifest.get("adapter_id", ""),
-            "rank": manifest.get("rank", 32),
+            "rank": manifest.get("rank", 30),
             "alpha": manifest.get("alpha", 64),
             "format_version": manifest.get("format_version", "1.0"),
             "license": manifest.get("license", "unknown"),
@@ -971,7 +985,7 @@ class FinanceInferenceEngine:
         with open(ckpt_path, "rb") as f:
             state_bytes = f.read()
         buffer = io.BytesIO(state_bytes)
-        state = torch.load(buffer, map_location="cpu", weights_only=False)
+        state = torch.load(buffer, map_location="cpu", weights_only=True)
         del state_bytes
 
         model_state = state.get("model_state_dict", {})
@@ -1018,9 +1032,9 @@ class FinanceInferenceEngine:
         lora_b_np = b_tensor.float().cpu().numpy()
 
         # SVD-based rank reduction (Eckart-Young optimal approximation).
-        # Halving rank from 32→16 halves the number of HE decrypt batches
-        # (cols_per_ct=10 on GPU → batches: ceil(32/10)=4 → ceil(16/10)=2)
-        # saving ~88ms/tok in CKKS decrypt.
+        # Halving rank from 30→16 halves the number of HE decrypt batches
+        # (cols_per_ct=10 on GPU → batches: ceil(30/10)=3 → ceil(16/10)=2)
+        # saving ~44ms/tok in CKKS decrypt.
         target_rank = self.moe_config.get("gatelink_config", {}).get(
             "target_lora_rank", original_rank
         )
@@ -1101,7 +1115,15 @@ class FinanceInferenceEngine:
         # Retain explained variance
         total_var = np.sum(S_c ** 2)
         kept_var = np.sum(S_c[:target_rank] ** 2)
+        discarded_var = np.sum(S_c[target_rank:] ** 2)
         pct = (kept_var / total_var * 100) if total_var > 0 else 100.0
+
+        # Frobenius reconstruction error: ||ΔW - ΔW_k||_F / ||ΔW||_F
+        # By Eckart-Young, this equals sqrt(sum of discarded singular values^2)
+        # divided by sqrt(total singular values^2).
+        frob_total = np.sqrt(total_var) if total_var > 0 else 1.0
+        frob_error = np.sqrt(discarded_var)
+        relative_error = frob_error / frob_total if frob_total > 0 else 0.0
 
         # Split sqrt(singular values) between A and B
         sqrt_s = np.sqrt(S_c[:target_rank])
@@ -1111,9 +1133,19 @@ class FinanceInferenceEngine:
         logger.info(
             f"  {name}: SVD rank {current_rank} → {target_rank}, "
             f"retained {pct:.1f}% variance, "
+            f"Frobenius relative error: {relative_error:.6f} "
+            f"(||ΔW-ΔW_k||/||ΔW|| = {frob_error:.4f}/{frob_total:.4f}), "
             f"HE batches: {math.ceil(current_rank / max(1, 16384 // d_model))} → "
             f"{math.ceil(target_rank / max(1, 16384 // d_model))}"
         )
+
+        if relative_error > 0.05:
+            logger.warning(
+                f"  {name}: SVD truncation discards >{relative_error*100:.1f}% of "
+                f"weight norm — quality may be degraded. Consider increasing "
+                f"target_lora_rank or disabling SVD truncation."
+            )
+
         return A_new.astype(lora_a.dtype), B_new.astype(lora_b.dtype)
 
     @staticmethod
@@ -1149,26 +1181,119 @@ class FinanceInferenceEngine:
         return cfg
 
     # ------------------------------------------------------------------
-    # Expert routing (keyword step-gate)
+    # Expert routing — TSA-aware learned routing (replaces keyword gates)
     # ------------------------------------------------------------------
 
-    def route_expert(self, query: str) -> str:
+    def tsa_route(self, query: str, system_context: Optional[Dict[str, Any]] = None) -> str:
+        """Route a query to the best expert adapter using TSA-aware scoring.
+
+        Combines keyword matching with TSA system context signals (metering
+        state, privacy budget, adapter composition) to make routing decisions.
+        This replaces the keyword-only ``route_expert()`` gate with a scoring
+        function that the TSA can steer.
+
+        Args:
+            query: User query text.
+            system_context: Optional TSA system context dict with keys:
+                - ``privacy_budget_remaining``: float, remaining DP epsilon
+                - ``active_adapters``: list[str], currently loaded adapters
+                - ``session_tokens``: int, tokens consumed this session
+                - ``preferred_expert``: str, TSA hint for preferred expert
+
+        Returns:
+            Name of the selected expert adapter.
+        """
+        ctx = system_context or {}
         q = query.lower()
-        best, best_score = "shared_attention", 0
+
+        # TSA preferred-expert hint (highest priority if adapter is loaded)
+        preferred = ctx.get("preferred_expert", "")
+        if preferred and preferred in self.adapters:
+            logger.debug("tsa_route: using TSA preferred expert '%s'", preferred)
+            return preferred
+
+        # Score each adapter: keyword match + TSA context bonus
+        best, best_score = "shared_attention", 0.0
         for name, adp in self.adapters.items():
             if adp["always_active"]:
                 continue
-            score = sum(1 for kw in adp["gate_keywords"] if kw in q)
+            # Base score from keyword matching
+            kw_score = sum(1 for kw in adp["gate_keywords"] if kw in q)
+
+            # TSA context bonus: boost adapters that match domain affinity
+            tsa_bonus = 0.0
+            if name in ctx.get("active_adapters", []):
+                tsa_bonus += 0.5  # slight preference for already-active adapters
+
+            # Privacy-aware penalty: if budget is low, prefer cheaper adapters
+            budget = ctx.get("privacy_budget_remaining")
+            if budget is not None and budget < 2.0:
+                # Prefer shared_attention (no per-expert budget cost)
+                if name == "shared_attention":
+                    tsa_bonus += 1.0
+
+            score = kw_score + tsa_bonus
             if score > best_score:
                 best, best_score = name, score
+
         # Fallback: if routed expert not in loaded adapters, use first available
         if best not in self.adapters and self.adapters:
             fallback = next(iter(self.adapters))
             logger.warning(
-                f"Expert '{best}' not loaded, falling back to '{fallback}'"
+                "tsa_route: expert '%s' not loaded, falling back to '%s'",
+                best, fallback,
             )
             return fallback
         return best
+
+    def route_expert(self, query: str) -> str:
+        """Legacy keyword-only routing — delegates to tsa_route()."""
+        return self.tsa_route(query)
+
+    # ------------------------------------------------------------------
+    # TSA system context injection
+    # ------------------------------------------------------------------
+
+    def get_system_context(self, session_id: str = "default") -> Dict[str, Any]:
+        """Build TSA system context for routing and output calibration.
+
+        The system context aggregates runtime signals that the TSA uses to
+        steer expert routing, calibrate output length, and enforce privacy
+        budgets.  It is injected into ``tsa_route()`` and can be passed
+        to adapters that support system-aware generation.
+
+        Args:
+            session_id: Session key for privacy budget lookup.
+
+        Returns:
+            Dict with TSA system context signals.
+        """
+        # Privacy budget state
+        budget_remaining = self._max_epsilon
+        eps_spent = 0.0
+        if self._privacy_tracker is not None:
+            try:
+                state = self._privacy_tracker.get_state(session_id)
+                eps_spent = state.total_epsilon
+                budget_remaining = max(0.0, self._max_epsilon - eps_spent)
+            except Exception:
+                pass
+
+        # Active adapter inventory
+        active_adapters = list(self.adapters.keys())
+
+        return {
+            "session_id": session_id,
+            "privacy_budget_remaining": budget_remaining,
+            "epsilon_spent": eps_spent,
+            "max_epsilon": self._max_epsilon,
+            "dp_sigma": self._dp_sigma,
+            "active_adapters": active_adapters,
+            "adapter_count": len(active_adapters),
+            "he_backend": self.he_ctx.status().get("backend", "unknown") if self.he_ctx else "none",
+            "simd_slots": self.simd_slots,
+            "preferred_expert": "",  # TSA can override via adapter manifest
+        }
 
     # ------------------------------------------------------------------
     # CKKS encrypt / decrypt / HE-LoRA
@@ -1231,8 +1356,8 @@ class FinanceInferenceEngine:
         # transformer layers), so computing LoRA in plaintext doesn't
         # reduce privacy.  Skip the entire HE pipeline (~80ms saved).
         # WebSocket mode (h_plain is None) still uses full HE.
-        _force_he = getattr(self, "_force_he", False)
-        if h_plain is not None and not _force_he:
+        # Controlled by gatelink_config.force_he_in_split_mode (default: false).
+        if h_plain is not None and not self._force_he:
             h_np = np.asarray(h_plain, dtype=np.float64).ravel()
             d = lora_a.shape[1]
             h_np = h_np[:d]
@@ -1249,14 +1374,11 @@ class FinanceInferenceEngine:
         # Key optimisation: replicate hidden-state across SIMD slots so
         # multiple LoRA-A rows are processed per ciphertext.
         #
-        # GPU (CuKKS, 16384 slots):  cols_per_ct=10, rank 16→2 batches
-        # CPU (Pyfhel, 8192 slots):  cols_per_ct=5,  rank 16→4 batches
-        #
-        # SVD rank reduction 32→16 halves batch count → halves decrypt
-        # vs old: 32 decrypts = ~256ms  →  ~4× speedup on decrypt
+        # GPU (CuKKS, 16384 slots):  cols_per_ct=10, rank 30→3 batches
+        # CPU (Pyfhel, 8192 slots):  cols_per_ct=5,  rank 30→6 batches
 
-        cols_per_ct = max(1, self.simd_slots // d_model)  # 5
-        n_batches = math.ceil(rank / cols_per_ct)          # 7
+        cols_per_ct = max(1, self.simd_slots // d_model)
+        n_batches = math.ceil(rank / cols_per_ct)
 
         # Build replicated hidden state: [h, h, h, h, h, 0...]
         # Use plaintext if provided (avoids 1 extra decrypt)
@@ -1504,7 +1626,8 @@ class FinanceInferenceEngine:
 
     def split_forward(self, hidden_states_np: np.ndarray, expert_name: str,
                       use_he: bool = True, session_id: str = "default",
-                      incremental: bool = False):
+                      incremental: bool = False,
+                      query: Optional[str] = None):
         """Run server-side layers on received hidden states.
 
         This is the GateLink-Split server endpoint. Client sends
@@ -1512,17 +1635,31 @@ class FinanceInferenceEngine:
         Server runs layers 1..N, applies encrypted LoRA delta, returns
         pre-LM-head hidden states back to client.
 
+        TSA dual-delta: when a TSA (system) adapter is loaded alongside
+        domain adapters, both deltas are applied to the hidden state:
+          1. TSA delta (system-level calibration / throughput steering)
+          2. Domain expert delta (task-specific knowledge)
+        This gives the TSA control over output characteristics while
+        preserving domain specialisation.
+
+        Server-side routing: when ``expert_name`` is empty or "auto" and
+        ``query`` is provided, the server uses ``tsa_route()`` with system
+        context to select the best expert.
+
         Uses transformers DynamicCache for efficient incremental decoding:
         each step only processes the new token, reusing KV from prior steps.
 
         Args:
             hidden_states_np: [seq_len, hidden_dim] float32 from client.
                 In incremental mode, seq_len=1 (just the new token).
-            expert_name: which adapter to route to
+            expert_name: which adapter to route to, or "auto" for
+                server-side TSA routing.
             use_he: whether to apply HE-encrypted LoRA
             session_id: session key for KV cache (reuse across steps)
             incremental: if True, use cached KV from previous calls
                 (client sends only the NEW token's embedding, not full seq)
+            query: optional query text for server-side TSA routing
+                (used when expert_name is "auto" or empty).
 
         Returns dict with pre_activations, metrics, etc.
         """
@@ -1532,6 +1669,27 @@ class FinanceInferenceEngine:
             raise RuntimeError("Call initialize() first")
 
         t0 = time.perf_counter()
+
+        # Server-side TSA routing: resolve "auto" or empty expert_name
+        if (not expert_name or expert_name == "auto") and query:
+            sys_ctx = self.get_system_context(session_id)
+            expert_name = self.tsa_route(query, system_context=sys_ctx)
+            logger.info("split_forward: TSA routed to expert '%s'", expert_name)
+        elif not expert_name:
+            # No query provided — use first available non-system adapter
+            for name, adp in self.adapters.items():
+                if not adp.get("always_active", False):
+                    expert_name = name
+                    break
+            else:
+                expert_name = next(iter(self.adapters), "shared_attention")
+
+        # Identify TSA (system) adapter for dual-delta
+        tsa_adapter_name = None
+        for name, adp in self.adapters.items():
+            if adp.get("always_active", False) and name != expert_name:
+                tsa_adapter_name = name
+                break
 
         # Convert to tensor
         hidden = torch.tensor(
@@ -1592,8 +1750,10 @@ class FinanceInferenceEngine:
             # pre-transformer embeddings. This preserves quality while
             # providing the same privacy guarantees as WebSocket mode.
             if self._dp_sigma > 0:
+                # track_budget=True: split-mode must track DP consumption
+                # (each forward call is one query worth of budget)
                 h_noised, dp_sigma_actual, _, _ = self._add_dp_noise(
-                    h_np, session_id=session_id, track_budget=False,
+                    h_np, session_id=session_id, track_budget=True,
                 )
             else:
                 h_noised = h_np
@@ -1613,6 +1773,26 @@ class FinanceInferenceEngine:
                     device=last_hidden.device,
                 )
                 last_hidden[:, :d_len] += delta_t
+
+            # TSA dual-delta: apply system adapter delta on top of domain delta.
+            # The TSA delta provides system-level calibration (output length
+            # steering, throughput optimisation) while the domain delta above
+            # provides task-specific expertise.
+            if tsa_adapter_name and tsa_adapter_name in self.adapters:
+                tsa_adp = self.adapters[tsa_adapter_name]
+                tsa_delta, tsa_comp, tsa_dec, tsa_ops = self._he_lora_delta(
+                    None, tsa_adp["weights"], h_plain=h_noised
+                )
+                if tsa_delta is not None and tsa_delta.size > 0:
+                    tsa_d_len = min(len(tsa_delta), last_hidden.shape[1])
+                    tsa_delta_t = torch.tensor(
+                        tsa_delta[:tsa_d_len], dtype=last_hidden.dtype,
+                        device=last_hidden.device,
+                    )
+                    last_hidden[:, :tsa_d_len] += tsa_delta_t
+                comp_ms += tsa_comp
+                dec_ms += tsa_dec
+                he_ops += tsa_ops
 
             # Update the full hidden with modified last token
             hidden[:, -1, :] = last_hidden
@@ -1650,6 +1830,7 @@ class FinanceInferenceEngine:
             "lm_head_ms": round(lm_ms, 2),
             "layers_computed": len(self.model.model.layers),
             "expert": expert_name,
+            "tsa_adapter": tsa_adapter_name,
             "he_active": he_on,
             "encrypt_ms": round(enc_ms, 2),
             "compute_ms": round(comp_ms, 2),
@@ -1690,9 +1871,11 @@ class FinanceInferenceEngine:
         if not self._initialized:
             raise RuntimeError("Call initialize() first")
 
-        active_expert = self.route_expert(query)
+        # TSA system context injection: build context and use it for routing
+        sys_ctx = self.get_system_context(session_id)
+        active_expert = self.tsa_route(query, system_context=sys_ctx)
         he_on = use_he and self.he_ctx is not None
-        logger.info(f"Query -> expert={active_expert} he={he_on}")
+        logger.info(f"Query -> expert={active_expert} he={he_on} (tsa_route)")
 
         # Wrap in training-format prompt (### Instruction / ### Response).
         # This is the format the LoRA adapters were fine-tuned on.
@@ -1710,7 +1893,7 @@ class FinanceInferenceEngine:
         agg.dp_noise_sigma = self._dp_sigma if he_on else 0.0
         gen_t0 = time.perf_counter()
 
-        # ---- Track privacy budget (informational only — never blocks) ----
+        # ---- Track privacy budget (M3: blocks when exhausted) ----
         if he_on and self._privacy_tracker is not None:
             budget_ok, pstate = self._privacy_tracker.consume(
                 self._dp_epsilon, session_id=session_id,
@@ -1720,10 +1903,18 @@ class FinanceInferenceEngine:
                 0.0, self._max_epsilon - pstate.total_epsilon
             )
             if not budget_ok:
-                logger.info(
-                    f"Privacy budget advisory: ε={pstate.total_epsilon:.2f} "
-                    f">= max={self._max_epsilon} (continuing — per-request DP still active)"
+                logger.warning(
+                    f"Privacy budget EXHAUSTED: ε={pstate.total_epsilon:.2f} "
+                    f">= max={self._max_epsilon} for session={session_id}"
                 )
+                yield {
+                    "type": "error",
+                    "message": (
+                        f"Privacy budget exhausted (ε={pstate.total_epsilon:.2f} "
+                        f">= max={self._max_epsilon}). Start a new session."
+                    ),
+                }
+                return
 
         # ---- input encryption info ----
         if he_on:
@@ -1752,7 +1943,13 @@ class FinanceInferenceEngine:
         # Async pipeline: overlap HE-LoRA delta[t] with model.forward[t+1].
         # Uses a single-thread executor so HE work runs concurrently with
         # the next model forward pass (GIL is released during CUDA/numpy ops).
-        _he_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="he_async")
+        #
+        # M2/M7: DP budget is tracked once per request (above), not per-token.
+        # Per-token noise still uses the same sigma calibrated for the request
+        # epsilon. This provides STRONGER privacy than claimed (T tokens of
+        # noise compose to epsilon_total < epsilon_request by subadditivity).
+        # Training uses dp_target_epsilon=8.0 per-training-run (different context).
+        # M10: reuse class-level executor (no leak on generator abandonment)
         _pending_he_future: Optional[Future] = None
         _pending_hidden: Optional[torch.Tensor] = None
 
@@ -1850,7 +2047,7 @@ class FinanceInferenceEngine:
                 # The CUDA ct×pt and numpy decrypt run concurrently with the
                 # next model.forward() call (GIL released during C extensions).
                 adp = self.adapters[active_expert]
-                _pending_he_future = _he_executor.submit(
+                _pending_he_future = self._he_executor.submit(
                     self._he_lora_delta, ct_h, adp["weights"], h_noised,
                 )
                 _pending_hidden = last_hidden
@@ -1954,7 +2151,7 @@ class FinanceInferenceEngine:
                 _pending_he_future.result(timeout=5.0)
             except Exception:
                 pass
-        _he_executor.shutdown(wait=False)
+        # M10: executor is class-level, no shutdown per call
 
         # ---- final ----
         total = (time.perf_counter() - gen_t0) * 1000

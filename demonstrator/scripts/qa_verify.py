@@ -95,7 +95,8 @@ def test_moe_config_gatelink():
         gl.get("device_profile") == "phone"
         and gl.get("client_layers") == 1
         and gl.get("dp_epsilon") == 1.0
-        and gl.get("max_lora_rank") == 32
+        and gl.get("max_lora_rank") == 30
+        and "force_he_in_split_mode" in gl
     )
 
 check("moe_config.json is valid JSON", test_moe_config_valid_json)
@@ -103,7 +104,7 @@ check("model is Qwen/Qwen2.5-1.5B", test_moe_config_has_model)
 check("has 3 experts", test_moe_config_has_3_experts)
 check("all expert TGSP paths exist", test_moe_config_expert_paths_exist)
 check("HE config correct (CKKS, N=16384, scale=40, slots=8192)", test_moe_config_he_config)
-check("GateLink config correct (phone, K=1, eps=1.0, rank=32)", test_moe_config_gatelink)
+check("GateLink config correct (phone, K=1, eps=1.0, rank=30)", test_moe_config_gatelink)
 
 
 # =========================================================
@@ -168,7 +169,7 @@ for adapter_name in ["banking_expert", "investment_expert", "shared_attention"]:
             import io
             with open(p, "rb") as f:
                 data = f.read()
-            state = torch.load(io.BytesIO(data), map_location="cpu", weights_only=False)
+            state = torch.load(io.BytesIO(data), map_location="cpu", weights_only=True)
             del data
             model_state = state.get("model_state_dict", {})
             lora_keys = [k for k in model_state if "lora_" in k.lower()]

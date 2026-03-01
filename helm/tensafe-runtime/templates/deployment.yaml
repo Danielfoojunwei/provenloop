@@ -1,0 +1,101 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-runtime
+  labels:
+    app: tensafe-runtime
+    chart: {{ .Chart.Name }}-{{ .Chart.Version }}
+spec:
+  replicas: {{ .Values.runtime.replicas }}
+  selector:
+    matchLabels:
+      app: tensafe-runtime
+  template:
+    metadata:
+      labels:
+        app: tensafe-runtime
+    spec:
+      containers:
+        - name: tensafe-runtime
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - containerPort: {{ .Values.service.port }}
+              name: http
+            {{- if .Values.monitoring.prometheus }}
+            - containerPort: {{ .Values.monitoring.metricsPort }}
+              name: metrics
+            {{- end }}
+            {{- if .Values.monitoring.complianceDashboard }}
+            - containerPort: {{ .Values.monitoring.dashboardPort }}
+              name: dashboard
+            {{- end }}
+          env:
+            - name: TENSAFE_LICENSE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Release.Name }}-license
+                  key: license-key
+            - name: TENSAFE_METERING
+              value: "{{ .Values.runtime.metering }}"
+            - name: TENSAFE_PQC
+              value: "{{ .Values.security.pqc }}"
+            - name: TENSAFE_FIPS
+              value: "{{ .Values.security.fips }}"
+            - name: TENSAFE_COMPLIANCE_HIPAA
+              value: "{{ .Values.compliance.hipaa }}"
+            - name: TENSAFE_COMPLIANCE_SOC2
+              value: "{{ .Values.compliance.soc2 }}"
+            - name: TENSAFE_COMPLIANCE_FEDRAMP
+              value: "{{ .Values.compliance.fedramp }}"
+            - name: TENSAFE_AGENTS_ENABLED
+              value: "{{ .Values.agents.enabled }}"
+            - name: TENSAFE_AGENTS_SELF_IMPROVE
+              value: "{{ .Values.agents.selfImprovement }}"
+            - name: TENSAFE_AGENTS_MAX_CONCURRENT
+              value: "{{ .Values.agents.maxConcurrent }}"
+            - name: TENSAFE_SWAP_REDTEAM
+              value: "{{ .Values.agents.swapRedTeam }}"
+            - name: TENSAFE_SWAP_APPROVAL
+              value: "{{ .Values.agents.swapApproval }}"
+            - name: TENSAFE_TGSP_VALIDATION
+              value: "{{ .Values.tgsp.validation }}"
+            - name: TENSAFE_DP_MAX_EPSILON
+              value: "{{ .Values.dp.maxEpsilon }}"
+            - name: TENSAFE_DP_BLOCK_EXHAUSTION
+              value: "{{ .Values.dp.blockOnExhaustion }}"
+            - name: TENSAFE_MULTI_TENANT
+              value: "{{ .Values.multiTenant.enabled }}"
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 120
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          {{- if .Values.persistence.enabled }}
+          volumeMounts:
+            - name: data
+              mountPath: /app/data
+          {{- end }}
+      {{- if .Values.gpu.enabled }}
+      nodeSelector:
+        nvidia.com/gpu.present: "true"
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+      {{- end }}
+      {{- if .Values.persistence.enabled }}
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ .Release.Name }}-data
+      {{- end }}

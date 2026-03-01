@@ -1,0 +1,121 @@
+name: "Train TGSP Adapter"
+description: "Train a LoRA adapter from data and package as TGSP using TG Tinker"
+author: "TenSafe"
+
+inputs:
+  data-path:
+    description: "Path to training data directory"
+    required: true
+  name:
+    description: "Adapter name"
+    required: true
+  domain:
+    description: "Domain (healthcare, finance, legal, general, engineering)"
+    required: false
+    default: "general"
+  rank:
+    description: "LoRA rank"
+    required: false
+    default: "30"
+  alpha:
+    description: "LoRA alpha"
+    required: false
+    default: "64"
+  signing-key:
+    description: "Path to Ed25519 signing key (PEM)"
+    required: false
+  quality-threshold:
+    description: "Minimum qa_verify score"
+    required: false
+    default: "0.80"
+  export-format:
+    description: "Additional export format (safetensors, pytorch, gguf, none)"
+    required: false
+    default: "none"
+
+outputs:
+  tgsp-path:
+    description: "Path to created .tgsp file"
+  quality-score:
+    description: "qa_verify quality score"
+  rvu-passed:
+    description: "Whether RVUv2 screening passed"
+
+runs:
+  using: "composite"
+  steps:
+    - name: Install dependencies
+      shell: bash
+      run: |
+        pip install --upgrade pip
+        pip install -r requirements.txt 2>/dev/null || pip install -r demonstrator/requirements.txt 2>/dev/null || true
+
+    - name: Analyze data
+      shell: bash
+      env:
+        PYTHONPATH: ${{ github.workspace }}
+      run: |
+        echo "=== Data Analysis ==="
+        python3 -m tensafe.cli.main train --data "${{ inputs.data-path }}" --analyze-only 2>/dev/null || \
+        python3 -c "
+        from tensafe.skills.tg_tinker.data_analyzer import analyze_data
+        result = analyze_data('${{ inputs.data-path }}')
+        print(f'Format: {result.format}')
+        print(f'Examples: {result.num_examples}')
+        print(f'Domain: {result.detected_domain}')
+        "
+
+    - name: Create adapter
+      shell: bash
+      id: create
+      env:
+        PYTHONPATH: ${{ github.workspace }}
+      run: |
+        ARGS="--data ${{ inputs.data-path }} --name ${{ inputs.name }}"
+        ARGS="$ARGS --domain ${{ inputs.domain }}"
+        ARGS="$ARGS --rank ${{ inputs.rank }} --alpha ${{ inputs.alpha }}"
+
+        if [ -n "${{ inputs.signing-key }}" ]; then
+          ARGS="$ARGS --signing-key ${{ inputs.signing-key }}"
+        fi
+
+        if [ "${{ inputs.export-format }}" != "none" ]; then
+          ARGS="$ARGS --export ${{ inputs.export-format }}"
+        fi
+
+        echo "Running: python3 -m tensafe.cli.main train $ARGS"
+        RESULT=$(python3 -m tensafe.cli.main train $ARGS --json)
+
+        TGSP_PATH=$(echo "$RESULT" | python3 -c "import sys,json; print(json.load(sys.stdin)['tgsp_path'])")
+        QUALITY=$(echo "$RESULT" | python3 -c "import sys,json; print(json.load(sys.stdin)['quality_score'])")
+        RVU=$(echo "$RESULT" | python3 -c "import sys,json; print(json.load(sys.stdin)['rvu_passed'])")
+
+        echo "tgsp-path=$TGSP_PATH" >> "$GITHUB_OUTPUT"
+        echo "quality-score=$QUALITY" >> "$GITHUB_OUTPUT"
+        echo "rvu-passed=$RVU" >> "$GITHUB_OUTPUT"
+
+        echo ""
+        echo "=== Results ==="
+        echo "TGSP: $TGSP_PATH"
+        echo "Quality: $QUALITY"
+        echo "RVUv2: $RVU"
+
+    - name: Quality gate
+      shell: bash
+      run: |
+        QUALITY="${{ steps.create.outputs.quality-score }}"
+        THRESHOLD="${{ inputs.quality-threshold }}"
+
+        if python3 -c "exit(0 if float('$QUALITY') >= float('$THRESHOLD') else 1)"; then
+          echo "Quality score $QUALITY >= threshold $THRESHOLD"
+        else
+          echo "::error::Quality score $QUALITY below threshold $THRESHOLD"
+          exit 1
+        fi
+
+    - name: Verify created adapter
+      shell: bash
+      env:
+        PYTHONPATH: ${{ github.workspace }}
+      run: |
+        python3 -m tensafe.cli.main verify "${{ steps.create.outputs.tgsp-path }}"

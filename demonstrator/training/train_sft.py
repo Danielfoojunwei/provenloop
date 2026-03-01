@@ -2,7 +2,7 @@
 
 Uses TenSafeOrchestrator with real PyTorch training.
 Three adapters: banking_expert, investment_expert, shared_attention.
-All rank 32, alpha 64.0, max SIMD / GPU batching.
+All rank 30, alpha 64.0, max SIMD / GPU batching.
 
 Crash-resilient: periodic checkpoints, resume support, gradient
 checkpointing, GPU memory cleanup, emergency save on OOM/crash.
@@ -171,7 +171,7 @@ def train_adapter(
     batch_size: int = 1,
     grad_accum: int = 8,
     learning_rate: float = 1e-4,
-    rank: int = 32,
+    rank: int = 30,
     alpha: float = 64.0,
     max_seq_length: int = 512,
     skip_completed: bool = True,
@@ -218,7 +218,7 @@ def train_adapter(
     dataset = cfg["dataset_fn"]()
     logger.info(f"Dataset size: {len(dataset)} samples")
 
-    tokenizer = AutoTokenizer.from_pretrained(QWEN_MODEL, trust_remote_code=True)
+    tokenizer = AutoTokenizer.from_pretrained(QWEN_MODEL, trust_remote_code=False)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
@@ -476,7 +476,7 @@ def main():
     )
     parser.add_argument("--output-dir", default="demonstrator/adapters")
     parser.add_argument("--max-steps", type=int, default=2000)
-    parser.add_argument("--rank", type=int, default=32)
+    parser.add_argument("--rank", type=int, default=30)
     parser.add_argument("--alpha", type=float, default=64.0)
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--grad-accum", type=int, default=8)

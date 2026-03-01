@@ -40,9 +40,10 @@ pub const KERNEL_NAMES: &[&str] = &[
 ///
 /// Barrett reduction on GPU:
 ///   For moduli q < 2^60 and inputs a,b < q, the product a*b < 2^120.
-///   Barrett constant bh = floor(2^128 / q) >> 64 ≈ 2^64 / q.
-///   Quotient estimate = __umul64hi(product_hi, bh).
-///   Remainder = product_lo - quotient * q, with at most 2 corrections.
+///   Barrett constant = floor(2^128 / q), stored as (bh, bl) = (hi64, lo64).
+///   Quotient estimate = hi * bh + __umul64hi(hi, bl) + __umul64hi(lo, bh),
+///   where hi:lo = a * b as 128 bits.
+///   Remainder = lo - quot * q, with at most 2 corrections.
 ///
 ///   Proof that no 64-bit overflow occurs in the remainder:
 ///   Since approx_quot ≤ true_quot, the true remainder r = a*b - approx_quot*q ≥ 0.
@@ -68,15 +69,18 @@ gpu_mod_sub(unsigned long long a, unsigned long long b, unsigned long long q) {
 }
 
 // Barrett modular multiply: (a * b) mod q
-// Requires: a, b < q < 2^60, bh = floor(2^128 / q) >> 64.
+// Requires: a, b < q < 2^60, bh:bl = floor(2^128 / q) as (hi64, lo64).
 __device__ __forceinline__ unsigned long long
 gpu_mod_mul(unsigned long long a, unsigned long long b,
-            unsigned long long q, unsigned long long bh) {
+            unsigned long long q, unsigned long long bh,
+            unsigned long long bl) {
     unsigned long long lo = a * b;
     unsigned long long hi = __umul64hi(a, b);
 
-    // Quotient estimate: ((hi:lo) * bh) >> 64 ≈ (hi * bh) >> 64
-    unsigned long long quot = __umul64hi(hi, bh);
+    // Full 128-bit Barrett: quot ≈ (hi:lo * bh:bl) >> 128
+    // = hi*bh + __umul64hi(hi, bl) + __umul64hi(lo, bh)
+    // (lower-order terms cannot affect the top 64 bits enough to matter)
+    unsigned long long quot = hi * bh + __umul64hi(hi, bl) + __umul64hi(lo, bh);
 
     // Remainder: lo - quot * q  (no overflow — see module doc)
     unsigned long long r = lo - quot * q;
@@ -126,11 +130,12 @@ __global__ void poly_hadamard(
     const unsigned long long* __restrict__ b,
     unsigned long long q,
     unsigned long long bh,
+    unsigned long long bl,
     unsigned int n
 ) {
     unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < n) {
-        out[i] = gpu_mod_mul(a[i], b[i], q, bh);
+        out[i] = gpu_mod_mul(a[i], b[i], q, bh, bl);
     }
 }
 
@@ -167,6 +172,7 @@ __global__ void ntt_fwd_stage(
     const unsigned long long* __restrict__ twiddles,
     unsigned long long q,
     unsigned long long bh,
+    unsigned long long bl,
     unsigned int t,
     unsigned int tw_offset
 ) {
@@ -180,7 +186,7 @@ __global__ void ntt_fwd_stage(
 
     unsigned long long w = twiddles[tw_offset + group_idx];
     unsigned long long u = data[idx0];
-    unsigned long long v = gpu_mod_mul(data[idx1], w, q, bh);
+    unsigned long long v = gpu_mod_mul(data[idx1], w, q, bh, bl);
 
     data[idx0] = gpu_mod_add(u, v, q);
     data[idx1] = gpu_mod_sub(u, v, q);
@@ -201,6 +207,7 @@ __global__ void ntt_inv_stage(
     const unsigned long long* __restrict__ twiddles,
     unsigned long long q,
     unsigned long long bh,
+    unsigned long long bl,
     unsigned int t,
     unsigned int tw_offset
 ) {
@@ -216,7 +223,7 @@ __global__ void ntt_inv_stage(
     unsigned long long v = data[idx1];
 
     data[idx0] = gpu_mod_add(u, v, q);
-    data[idx1] = gpu_mod_mul(gpu_mod_sub(u, v, q), w, q, bh);
+    data[idx1] = gpu_mod_mul(gpu_mod_sub(u, v, q), w, q, bh, bl);
 }
 
 // =====================================================================
@@ -231,6 +238,7 @@ __global__ void ntt_fwd_fused(
     unsigned long long* __restrict__ data,
     const unsigned long long* __restrict__ twiddles,
     unsigned long long q, unsigned long long bh,
+    unsigned long long bl,
     unsigned int log_n, unsigned int first_stage
 ) {
     extern __shared__ unsigned long long smem[];
@@ -261,7 +269,7 @@ __global__ void ntt_fwd_fused(
         unsigned long long v_raw = smem[local_idx1];
         __syncthreads();
 
-        unsigned long long v = gpu_mod_mul(v_raw, w, q, bh);
+        unsigned long long v = gpu_mod_mul(v_raw, w, q, bh, bl);
         smem[local_idx0] = gpu_mod_add(u, v, q);
         smem[local_idx1] = gpu_mod_sub(u, v, q);
         __syncthreads();
@@ -280,6 +288,7 @@ __global__ void ntt_inv_fused(
     unsigned long long* __restrict__ data,
     const unsigned long long* __restrict__ twiddles,
     unsigned long long q, unsigned long long bh,
+    unsigned long long bl,
     unsigned int num_fused_stages
 ) {
     extern __shared__ unsigned long long smem[];
@@ -322,7 +331,7 @@ __global__ void ntt_inv_fused(
         __syncthreads();
 
         smem[local_idx0] = gpu_mod_add(u, v, q);
-        smem[local_idx1] = gpu_mod_mul(gpu_mod_sub(u, v, q), w, q, bh);
+        smem[local_idx1] = gpu_mod_mul(gpu_mod_sub(u, v, q), w, q, bh, bl);
         __syncthreads();
     }
 
@@ -338,11 +347,12 @@ __global__ void poly_scale(
     unsigned long long scalar,
     unsigned long long q,
     unsigned long long bh,
+    unsigned long long bl,
     unsigned int n
 ) {
     unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < n) {
-        data[i] = gpu_mod_mul(data[i], scalar, q, bh);
+        data[i] = gpu_mod_mul(data[i], scalar, q, bh, bl);
     }
 }
 
@@ -357,11 +367,12 @@ __global__ void fwd_twist(
     const unsigned long long* __restrict__ psi_powers,
     unsigned long long q,
     unsigned long long bh,
+    unsigned long long bl,
     unsigned int n
 ) {
     unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < n) {
-        data[i] = gpu_mod_mul(data[i], psi_powers[i], q, bh);
+        data[i] = gpu_mod_mul(data[i], psi_powers[i], q, bh, bl);
     }
 }
 
@@ -372,11 +383,12 @@ __global__ void inv_twist(
     const unsigned long long* __restrict__ inv_psi_powers,
     unsigned long long q,
     unsigned long long bh,
+    unsigned long long bl,
     unsigned int n
 ) {
     unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < n) {
-        data[i] = gpu_mod_mul(data[i], inv_psi_powers[i], q, bh);
+        data[i] = gpu_mod_mul(data[i], inv_psi_powers[i], q, bh, bl);
     }
 }
 
@@ -394,11 +406,12 @@ __global__ void encrypt_fused(
     const unsigned long long* __restrict__ e,
     unsigned long long q,
     unsigned long long bh,
+    unsigned long long bl,
     unsigned int n
 ) {
     unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < n) {
-        unsigned long long as_val = gpu_mod_mul(a[i], s[i], q, bh);
+        unsigned long long as_val = gpu_mod_mul(a[i], s[i], q, bh, bl);
         unsigned long long neg_as = (as_val == 0) ? 0 : (q - as_val);
         unsigned long long m_plus_e = gpu_mod_add(m[i], e[i], q);
         c0[i] = gpu_mod_add(neg_as, m_plus_e, q);
@@ -414,11 +427,12 @@ __global__ void decrypt_fused(
     const unsigned long long* __restrict__ s,
     unsigned long long q,
     unsigned long long bh,
+    unsigned long long bl,
     unsigned int n
 ) {
     unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < n) {
-        unsigned long long c1s = gpu_mod_mul(c1[i], s[i], q, bh);
+        unsigned long long c1s = gpu_mod_mul(c1[i], s[i], q, bh, bl);
         m_out[i] = gpu_mod_add(c0[i], c1s, q);
     }
 }

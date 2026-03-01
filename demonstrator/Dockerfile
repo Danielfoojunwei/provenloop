@@ -65,11 +65,13 @@ COPY requirements.txt /app/requirements.txt
 RUN grep -vE '^flash-attn|^autoawq' /app/requirements.txt > /app/requirements-core.txt \
     && pip install --no-cache-dir -r /app/requirements-core.txt
 
-# Optional GPU-accelerated packages (fail gracefully on CPU-only / CI builds)
-RUN pip install --no-cache-dir 'flash-attn>=2.0' 2>/dev/null \
-    || echo "INFO: flash-attn skipped (requires CUDA compiler)"
-RUN pip install --no-cache-dir 'autoawq>=0.2.0' 2>/dev/null \
-    || echo "INFO: autoawq skipped (requires CUDA compiler)"
+# Optional GPU-accelerated packages (skip source builds — use pre-built wheels only).
+# Compiling flash-attn from source takes 30-40 min; --only-binary avoids this.
+# On real GPU hosts, install these manually: pip install flash-attn autoawq
+RUN pip install --no-cache-dir --only-binary :all: 'flash-attn>=2.0' 2>/dev/null \
+    || echo "INFO: flash-attn skipped (no pre-built wheel for this platform)"
+RUN pip install --no-cache-dir --only-binary :all: 'autoawq>=0.2.0' 2>/dev/null \
+    || echo "INFO: autoawq skipped (no pre-built wheel for this platform)"
 
 # ---- Install pre-built tensafe-he wheel from builder stage ----
 COPY --from=rust-builder /build/tensafe-he/target/wheels/tensafe_he-*.whl /tmp/
